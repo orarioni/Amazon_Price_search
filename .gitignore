@@ -1,0 +1,5 @@
+secrets/*.xml
+logs/*
+!logs/.gitkeep
+cache/*
+!cache/.gitkeep
