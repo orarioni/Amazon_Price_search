@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot '..')
 $secretFile = Join-Path $repoRoot 'secrets/lwa_secrets.xml'
@@ -10,10 +10,12 @@ $logPath = Join-Path $logDir 'run.log'
 
 $marketplaceId = 'A1VC38T7YXB528'
 $spBase = 'https://sellingpartnerapi-fe.amazon.com'
-$awsRegion = 'us-west-2'
-$awsService = 'execute-api'
 $userAgent = 'AmazonPriceTool/0.1'
 $maxRetries = 4
+
+$asinCol = 7
+$priceCol = 8
+$timestampCol = 9
 
 if (-not (Test-Path $logDir)) {
     New-Item -ItemType Directory -Path $logDir -Force | Out-Null
@@ -43,7 +45,8 @@ function ConvertTo-PlainText {
 function Invoke-WithRetry {
     param(
         [scriptblock]$Action,
-        [string]$Label
+        [string]$Label,
+        [bool]$RetryOnTransient = $true
     )
 
     $attempt = 0
@@ -58,7 +61,7 @@ function Invoke-WithRetry {
                 $statusCode = [int]$_.Exception.Response.StatusCode
             }
 
-            $retryable = ($statusCode -eq 429) -or ($statusCode -ge 500 -and $statusCode -lt 600)
+            $retryable = $RetryOnTransient -and (($statusCode -eq 429) -or ($statusCode -ge 500 -and $statusCode -lt 600))
             if ($retryable -and $attempt -lt $maxRetries) {
                 $sleepSec = [Math]::Pow(2, $attempt)
                 Write-Log "$Label 失敗 (HTTP $statusCode)。$sleepSec 秒後にリトライします (試行 $attempt/$maxRetries)。" 'WARN'
@@ -97,143 +100,28 @@ function Get-LwaAccessToken {
     return $res.access_token
 }
 
-function Get-Sha256Hex {
-    param([string]$Text)
-    $bytes = [Text.Encoding]::UTF8.GetBytes($Text)
-    $hash = [Security.Cryptography.SHA256]::Create().ComputeHash($bytes)
-    return ([BitConverter]::ToString($hash)).Replace('-', '').ToLowerInvariant()
-}
-
-function Get-HmacSha256 {
+function New-SpApiHeaders {
     param(
-        [byte[]]$Key,
-        [string]$Data
-    )
-
-    $hmac = [Security.Cryptography.HMACSHA256]::new($Key)
-    try {
-        $bytes = [Text.Encoding]::UTF8.GetBytes($Data)
-        return $hmac.ComputeHash($bytes)
-    }
-    finally {
-        $hmac.Dispose()
-    }
-}
-
-function ConvertTo-SigV4Encoded {
-    param([string]$Value)
-
-    if ($null -eq $Value) {
-        return ''
-    }
-
-    return [Uri]::EscapeDataString($Value).Replace('+', '%20').Replace('*', '%2A').Replace('%7E', '~')
-}
-
-function Get-CanonicalQueryString {
-    param([uri]$Uri)
-
-    $query = $Uri.Query.TrimStart('?')
-    if ([string]::IsNullOrEmpty($query)) {
-        return ''
-    }
-
-    $pairs = @()
-    foreach ($part in ($query -split '&')) {
-        if ($part -eq '') {
-            continue
-        }
-
-        $kv = $part -split '=', 2
-        $keyRaw = [Uri]::UnescapeDataString($kv[0])
-        $valueRaw = if ($kv.Count -gt 1) { [Uri]::UnescapeDataString($kv[1]) } else { '' }
-        $pairs += [PSCustomObject]@{
-            Key = ConvertTo-SigV4Encoded -Value $keyRaw
-            Value = ConvertTo-SigV4Encoded -Value $valueRaw
-        }
-    }
-
-    return (($pairs | Sort-Object Key, Value | ForEach-Object { "{0}={1}" -f $_.Key, $_.Value }) -join '&')
-}
-
-function New-SpApiAuthHeaders {
-    param(
-        [string]$Method,
         [string]$Uri,
-        [string]$AccessToken,
-        [string]$AwsAccessKeyId,
-        [string]$AwsSecretAccessKey,
-        [string]$AwsSessionToken
+        [string]$AccessToken
     )
 
     $requestUri = [uri]$Uri
     $amzDate = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
-    $dateStamp = (Get-Date).ToUniversalTime().ToString('yyyyMMdd')
-    $payloadHash = Get-Sha256Hex -Text ''
 
-    $canonicalUri = if ([string]::IsNullOrEmpty($requestUri.AbsolutePath)) { '/' } else { $requestUri.AbsolutePath }
-    $canonicalQueryString = Get-CanonicalQueryString -Uri $requestUri
-
-    $headers = [ordered]@{
-        host                 = $requestUri.Host
-        'x-amz-access-token' = $AccessToken
-        'x-amz-date'         = $amzDate
-    }
-    if (-not [string]::IsNullOrWhiteSpace($AwsSessionToken)) {
-        $headers['x-amz-security-token'] = $AwsSessionToken
-    }
-
-    $canonicalHeaders = (($headers.GetEnumerator() | Sort-Object Name | ForEach-Object { "{0}:{1}" -f $_.Name.ToLowerInvariant(), $_.Value.Trim() }) -join "`n") + "`n"
-    $signedHeaders = ($headers.Keys | Sort-Object | ForEach-Object { $_.ToLowerInvariant() }) -join ';'
-
-    $canonicalRequest = @(
-        $Method.ToUpperInvariant()
-        $canonicalUri
-        $canonicalQueryString
-        $canonicalHeaders
-        $signedHeaders
-        $payloadHash
-    ) -join "`n"
-
-    $credentialScope = "$dateStamp/$awsRegion/$awsService/aws4_request"
-    $stringToSign = @(
-        'AWS4-HMAC-SHA256'
-        $amzDate
-        $credentialScope
-        (Get-Sha256Hex -Text $canonicalRequest)
-    ) -join "`n"
-
-    $kDate = Get-HmacSha256 -Key ([Text.Encoding]::UTF8.GetBytes("AWS4$AwsSecretAccessKey")) -Data $dateStamp
-    $kRegion = Get-HmacSha256 -Key $kDate -Data $awsRegion
-    $kService = Get-HmacSha256 -Key $kRegion -Data $awsService
-    $kSigning = Get-HmacSha256 -Key $kService -Data 'aws4_request'
-    $signatureBytes = Get-HmacSha256 -Key $kSigning -Data $stringToSign
-    $signature = ([BitConverter]::ToString($signatureBytes)).Replace('-', '').ToLowerInvariant()
-
-    $authorizationHeader = "AWS4-HMAC-SHA256 Credential=$AwsAccessKeyId/$credentialScope, SignedHeaders=$signedHeaders, Signature=$signature"
-
-    $requestHeaders = @{
-        'Authorization'      = $authorizationHeader
+    return @{
+        'host'               = $requestUri.Host
         'x-amz-access-token' = $AccessToken
         'x-amz-date'         = $amzDate
         'User-Agent'         = $userAgent
         'Accept'             = 'application/json'
     }
-
-    if (-not [string]::IsNullOrWhiteSpace($AwsSessionToken)) {
-        $requestHeaders['x-amz-security-token'] = $AwsSessionToken
-    }
-
-    return $requestHeaders
 }
 
 function Get-AsinMapByJanBatch {
     param(
-        [string[]]$Jans,
-        [string]$AccessToken,
-        [string]$AwsAccessKeyId,
-        [string]$AwsSecretAccessKey,
-        [string]$AwsSessionToken
+        [string]$Jan,
+        [string]$AccessToken
     )
 
     $asinMap = @{}
@@ -245,10 +133,10 @@ function Get-AsinMapByJanBatch {
     $identifiers = ($escapedJans -join ',')
     $uri = "$spBase/catalog/2022-04-01/items?identifiers=$identifiers&identifiersType=EAN&marketplaceIds=$marketplaceId"
 
-    $response = Invoke-WithRetry -Label "Catalog取得 JANバッチ ($($Jans.Count)件)" -Action {
-        $headers = New-SpApiAuthHeaders -Method 'GET' -Uri $uri -AccessToken $AccessToken -AwsAccessKeyId $AwsAccessKeyId -AwsSecretAccessKey $AwsSecretAccessKey -AwsSessionToken $AwsSessionToken
+    $res = Invoke-WithRetry -Label "Catalog取得 JAN=$Jan" -Action {
+        $headers = New-SpApiHeaders -Uri $uri -AccessToken $AccessToken
         Invoke-RestMethod -Method Get -Uri $uri -Headers $headers
-    }
+    } -RetryOnTransient $false
 
     foreach ($item in ($response.items | Where-Object { $_ -and $_.asin })) {
         $itemJans = @()
@@ -287,18 +175,15 @@ function Get-AsinMapByJanBatch {
 function Get-LowestNewPrice {
     param(
         [string]$Asin,
-        [string]$AccessToken,
-        [string]$AwsAccessKeyId,
-        [string]$AwsSecretAccessKey,
-        [string]$AwsSessionToken
+        [string]$AccessToken
     )
 
     $uri = "$spBase/products/pricing/v0/items/$([Uri]::EscapeDataString($Asin))/offers?MarketplaceId=$marketplaceId&ItemCondition=New"
 
     $res = Invoke-WithRetry -Label "Pricing取得 ASIN=$Asin" -Action {
-        $headers = New-SpApiAuthHeaders -Method 'GET' -Uri $uri -AccessToken $AccessToken -AwsAccessKeyId $AwsAccessKeyId -AwsSecretAccessKey $AwsSecretAccessKey -AwsSessionToken $AwsSessionToken
+        $headers = New-SpApiHeaders -Uri $uri -AccessToken $AccessToken
         Invoke-RestMethod -Method Get -Uri $uri -Headers $headers
-    }
+    } -RetryOnTransient $false
 
     if (-not $res.payload -or -not $res.payload.Offers) {
         return $null
@@ -346,14 +231,6 @@ $secret = Import-Clixml -Path $secretFile
 $clientId = $secret.client_id
 $clientSecret = ConvertTo-PlainText -Secure $secret.client_secret
 $refreshToken = ConvertTo-PlainText -Secure $secret.refresh_token
-$awsAccessKeyId = $secret.aws_access_key_id
-$awsSecretAccessKey = ConvertTo-PlainText -Secure $secret.aws_secret_access_key
-$awsSessionToken = $secret.aws_session_token
-
-if ([string]::IsNullOrWhiteSpace($awsAccessKeyId) -or [string]::IsNullOrWhiteSpace($awsSecretAccessKey)) {
-    throw 'AWS認証情報が secrets/lwa_secrets.xml に設定されていません。run_init.bat を再実行して aws_access_key_id / aws_secret_access_key を登録してください。'
-}
-
 Write-Log '更新処理を開始します。'
 $accessToken = Get-LwaAccessToken -ClientId $clientId -ClientSecret $clientSecret -RefreshToken $refreshToken
 
@@ -425,11 +302,11 @@ try {
         $jan = [string]$sheet.Cells.Item($row, 2).Text
         $jan = $jan.Trim()
 
-        $sheet.Cells.Item($row, 5).Value2 = $timestamp
+        $sheet.Cells.Item($row, $timestampCol).Value2 = $timestamp
 
         if ([string]::IsNullOrWhiteSpace($jan)) {
-            $sheet.Cells.Item($row, 3).Value2 = ''
-            $sheet.Cells.Item($row, 4).Value2 = ''
+            $sheet.Cells.Item($row, $asinCol).Value2 = ''
+            $sheet.Cells.Item($row, $priceCol).Value2 = ''
             continue
         }
 
@@ -438,28 +315,47 @@ try {
                 $result = $cache[$jan]
             }
             else {
-                $result = [PSCustomObject]@{ asin = $null; price = $null }
+                $asin = Get-AsinByJan -Jan $jan -AccessToken $accessToken
+                if ($asin) {
+                    $price = Get-LowestNewPrice -Asin $asin -AccessToken $accessToken
+                    $result = [PSCustomObject]@{ asin = $asin; price = $price }
+                }
+                else {
+                    $result = [PSCustomObject]@{ asin = $null; price = $null }
+                }
+                $cache[$jan] = $result
             }
 
             if ($result.asin) {
-                $sheet.Cells.Item($row, 3).Value2 = $result.asin
+                $sheet.Cells.Item($row, $asinCol).Value2 = $result.asin
             }
             else {
-                $sheet.Cells.Item($row, 3).Value2 = ''
+                $sheet.Cells.Item($row, $asinCol).Value2 = ''
             }
 
             if ($null -ne $result.price) {
-                $sheet.Cells.Item($row, 4).Value2 = [double]$result.price
+                $sheet.Cells.Item($row, $priceCol).Value2 = [double]$result.price
             }
             else {
-                $sheet.Cells.Item($row, 4).Value2 = ''
+                $sheet.Cells.Item($row, $priceCol).Value2 = ''
             }
         }
         catch {
             $errorCount++
-            $sheet.Cells.Item($row, 3).Value2 = ''
-            $sheet.Cells.Item($row, 4).Value2 = ''
-            Write-Log "行$row JAN=$jan の処理でエラー: $($_.Exception.Message)" 'ERROR'
+            $sheet.Cells.Item($row, $asinCol).Value2 = ''
+            $sheet.Cells.Item($row, $priceCol).Value2 = ''
+
+            $statusCode = $null
+            if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
+                $statusCode = [int]$_.Exception.Response.StatusCode
+            }
+
+            if ($statusCode) {
+                Write-Log "行$row JAN=$jan の処理でエラー (HTTP $statusCode): $($_.Exception.Message)" 'ERROR'
+            }
+            else {
+                Write-Log "行$row JAN=$jan の処理でエラー: $($_.Exception.Message)" 'ERROR'
+            }
         }
 
         $processed++
