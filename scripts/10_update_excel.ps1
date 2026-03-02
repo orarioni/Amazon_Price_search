@@ -118,24 +118,58 @@ function New-SpApiHeaders {
     }
 }
 
-function Get-AsinByJan {
+function Get-AsinMapByJanBatch {
     param(
         [string]$Jan,
         [string]$AccessToken
     )
 
-    $uri = "$spBase/catalog/2022-04-01/items?identifiers=$([Uri]::EscapeDataString($Jan))&identifiersType=EAN&marketplaceIds=$marketplaceId"
+    $asinMap = @{}
+    if (-not $Jans -or $Jans.Count -eq 0) {
+        return $asinMap
+    }
+
+    $escapedJans = $Jans | ForEach-Object { [Uri]::EscapeDataString($_) }
+    $identifiers = ($escapedJans -join ',')
+    $uri = "$spBase/catalog/2022-04-01/items?identifiers=$identifiers&identifiersType=EAN&marketplaceIds=$marketplaceId"
 
     $res = Invoke-WithRetry -Label "Catalog取得 JAN=$Jan" -Action {
         $headers = New-SpApiHeaders -Uri $uri -AccessToken $AccessToken
         Invoke-RestMethod -Method Get -Uri $uri -Headers $headers
     } -RetryOnTransient $false
 
-    if ($res.items -and $res.items.Count -gt 0) {
-        return $res.items[0].asin
+    foreach ($item in ($response.items | Where-Object { $_ -and $_.asin })) {
+        $itemJans = @()
+
+        if ($item.identifiers) {
+            foreach ($idGroup in $item.identifiers) {
+                if ($idGroup.identifiers) {
+                    foreach ($idObj in $idGroup.identifiers) {
+                        if ($idObj.identifier) {
+                            $itemJans += [string]$idObj.identifier
+                        }
+                    }
+                }
+            }
+        }
+
+        if ($itemJans.Count -eq 0 -and $item.externalIds -and $item.externalIds.eans) {
+            $itemJans += $item.externalIds.eans
+        }
+
+        foreach ($itemJan in $itemJans) {
+            $normalizedJan = ([string]$itemJan).Trim()
+            if ([string]::IsNullOrWhiteSpace($normalizedJan)) {
+                continue
+            }
+
+            if ($Jans -contains $normalizedJan -and -not $asinMap.ContainsKey($normalizedJan)) {
+                $asinMap[$normalizedJan] = [string]$item.asin
+            }
+        }
     }
 
-    return $null
+    return $asinMap
 }
 
 function Get-LowestNewPrice {
@@ -213,8 +247,55 @@ try {
     $lastRow = $sheet.Cells($sheet.Rows.Count, 2).End(-4162).Row
 
     $cache = @{}
+    $batchSize = 20
     $processed = 0
     $errorCount = 0
+
+    $janSet = [System.Collections.Generic.HashSet[string]]::new()
+    for ($row = 2; $row -le $lastRow; $row++) {
+        $jan = ([string]$sheet.Cells.Item($row, 2).Text).Trim()
+        if (-not [string]::IsNullOrWhiteSpace($jan)) {
+            [void]$janSet.Add($jan)
+        }
+    }
+
+    $uniqueJans = @($janSet)
+    Write-Log "JAN事前収集: 全$($uniqueJans.Count)件"
+
+    if ($uniqueJans.Count -gt 0) {
+        $asinByJan = @{}
+        for ($offset = 0; $offset -lt $uniqueJans.Count; $offset += $batchSize) {
+            $end = [Math]::Min($offset + $batchSize - 1, $uniqueJans.Count - 1)
+            $janBatch = @($uniqueJans[$offset..$end])
+            $batchMap = Get-AsinMapByJanBatch -Jans $janBatch -AccessToken $accessToken -AwsAccessKeyId $awsAccessKeyId -AwsSecretAccessKey $awsSecretAccessKey -AwsSessionToken $awsSessionToken
+
+            foreach ($entry in $batchMap.GetEnumerator()) {
+                $asinByJan[$entry.Key] = $entry.Value
+            }
+
+            $resolved = $batchMap.Count
+            $unresolved = $janBatch.Count - $resolved
+            Write-Log "JANバッチ取得: offset=$offset 件数=$($janBatch.Count) 成功=$resolved 未解決=$unresolved"
+        }
+
+        foreach ($jan in $uniqueJans) {
+            try {
+                $asin = if ($asinByJan.ContainsKey($jan)) { $asinByJan[$jan] } else { $null }
+                if ($asin) {
+                    $price = Get-LowestNewPrice -Asin $asin -AccessToken $accessToken -AwsAccessKeyId $awsAccessKeyId -AwsSecretAccessKey $awsSecretAccessKey -AwsSessionToken $awsSessionToken
+                    $cache[$jan] = [PSCustomObject]@{ asin = $asin; price = $price }
+                }
+                else {
+                    $cache[$jan] = [PSCustomObject]@{ asin = $null; price = $null }
+                }
+            }
+            catch {
+                $errorCount++
+                $cache[$jan] = [PSCustomObject]@{ asin = $null; price = $null }
+                Write-Log "JAN=$jan の事前解決でエラー: $($_.Exception.Message)" 'ERROR'
+            }
+        }
+    }
 
     for ($row = 2; $row -le $lastRow; $row++) {
         $timestamp = (Get-Date).ToString('o')
