@@ -45,7 +45,8 @@ function ConvertTo-PlainText {
 function Invoke-WithRetry {
     param(
         [scriptblock]$Action,
-        [string]$Label
+        [string]$Label,
+        [bool]$RetryOnTransient = $true
     )
 
     $attempt = 0
@@ -60,7 +61,7 @@ function Invoke-WithRetry {
                 $statusCode = [int]$_.Exception.Response.StatusCode
             }
 
-            $retryable = ($statusCode -eq 429) -or ($statusCode -ge 500 -and $statusCode -lt 600)
+            $retryable = $RetryOnTransient -and (($statusCode -eq 429) -or ($statusCode -ge 500 -and $statusCode -lt 600))
             if ($retryable -and $attempt -lt $maxRetries) {
                 $sleepSec = [Math]::Pow(2, $attempt)
                 Write-Log "$Label 失敗 (HTTP $statusCode)。$sleepSec 秒後にリトライします (試行 $attempt/$maxRetries)。" 'WARN'
@@ -128,7 +129,7 @@ function Get-AsinByJan {
     $res = Invoke-WithRetry -Label "Catalog取得 JAN=$Jan" -Action {
         $headers = New-SpApiHeaders -Uri $uri -AccessToken $AccessToken
         Invoke-RestMethod -Method Get -Uri $uri -Headers $headers
-    }
+    } -RetryOnTransient $false
 
     if ($res.items -and $res.items.Count -gt 0) {
         return $res.items[0].asin
@@ -148,7 +149,7 @@ function Get-LowestNewPrice {
     $res = Invoke-WithRetry -Label "Pricing取得 ASIN=$Asin" -Action {
         $headers = New-SpApiHeaders -Uri $uri -AccessToken $AccessToken
         Invoke-RestMethod -Method Get -Uri $uri -Headers $headers
-    }
+    } -RetryOnTransient $false
 
     if (-not $res.payload -or -not $res.payload.Offers) {
         return $null
@@ -262,7 +263,18 @@ try {
             $errorCount++
             $sheet.Cells.Item($row, $asinCol).Value2 = ''
             $sheet.Cells.Item($row, $priceCol).Value2 = ''
-            Write-Log "行$row JAN=$jan の処理でエラー: $($_.Exception.Message)" 'ERROR'
+
+            $statusCode = $null
+            if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
+                $statusCode = [int]$_.Exception.Response.StatusCode
+            }
+
+            if ($statusCode) {
+                Write-Log "行$row JAN=$jan の処理でエラー (HTTP $statusCode): $($_.Exception.Message)" 'ERROR'
+            }
+            else {
+                Write-Log "行$row JAN=$jan の処理でエラー: $($_.Exception.Message)" 'ERROR'
+            }
         }
 
         $processed++
