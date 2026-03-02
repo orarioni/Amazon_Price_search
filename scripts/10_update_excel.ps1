@@ -15,6 +15,7 @@ $marketplaceId = 'A1VC38T7YXB528'
 $spBase = 'https://sellingpartnerapi-fe.amazon.com'
 $userAgent = 'AmazonPriceTool/0.3'
 $maxRetries = 4
+$httpTimeoutSec = 45
 $catalogBatchSize = 20
 $pricingBatchSize = 20
 $cacheTtlHours = 24
@@ -87,7 +88,7 @@ function Classify-StatusAndBody {
         return [PSCustomObject]@{ Class = 'NotFound/Validation'; IsTransient = $false; IsPermanentNotFound = $true }
     }
 
-    if ($text -match 'throttl|rate\s*exceed|too\s*many\s*requests|temporar|timeout|service\s*unavailable') {
+    if ($text -match 'throttl|rate\s*exceed|too\s*many\s*requests|temporar|timeout|timed\s*out|time\s*out|operation\s*timed\s*out|service\s*unavailable') {
         return [PSCustomObject]@{ Class = 'RateLimit/Server'; IsTransient = $true; IsPermanentNotFound = $false }
     }
 
@@ -119,6 +120,10 @@ function Get-ErrorDetail {
         catch {}
     }
 
+    if (-not $bodyText -and $ErrorRecord -and $ErrorRecord.Exception -and $ErrorRecord.Exception.Message) {
+        $bodyText = [string]$ErrorRecord.Exception.Message
+    }
+
     $classification = Classify-StatusAndBody -StatusCode $statusCode -BodyText $bodyText
     return [PSCustomObject]@{
         StatusCode          = $statusCode
@@ -146,12 +151,16 @@ function Invoke-WithRetry {
 
             if ($detail.IsTransient -and $attempt -lt $maxRetries) {
                 $sleepSec = [Math]::Pow(2, $attempt)
-                Write-Log "$Label 失敗 (分類=$($detail.Class), HTTP $($detail.StatusCode))。$sleepSec 秒後にリトライします (試行 $attempt/$maxRetries)。" 'WARN'
+                $isTimeout = ($detail.BodyText -and $detail.BodyText.ToLowerInvariant() -match 'timeout|timed\s*out|time\s*out|operation\s*timed\s*out')
+                $timeoutTag = if ($isTimeout) { 'タイムアウトあり' } else { 'タイムアウトなし' }
+                Write-Log "$Label 失敗 (分類=$($detail.Class), HTTP $($detail.StatusCode), $timeoutTag)。$sleepSec 秒後にリトライします (試行 $attempt/$maxRetries)。" 'WARN'
                 Start-Sleep -Seconds $sleepSec
                 continue
             }
 
-            Write-Log "$Label 失敗 (分類=$($detail.Class), HTTP $($detail.StatusCode))。再試行を終了します。" 'WARN'
+            $isTimeout = ($detail.BodyText -and $detail.BodyText.ToLowerInvariant() -match 'timeout|timed\s*out|time\s*out|operation\s*timed\s*out')
+            $timeoutTag = if ($isTimeout) { 'タイムアウトあり' } else { 'タイムアウトなし' }
+            Write-Log "$Label 失敗 (分類=$($detail.Class), HTTP $($detail.StatusCode), $timeoutTag)。再試行を終了します。" 'WARN'
             throw
         }
     }
@@ -194,7 +203,7 @@ function Get-LwaAccessToken {
     $res = Invoke-WithRetry -Label 'LWAトークン取得' -Action {
         Invoke-RestMethod -Method Post -Uri 'https://api.amazon.com/auth/o2/token' -ContentType 'application/x-www-form-urlencoded' -Body $body -Headers @{
             'User-Agent' = $userAgent
-        }
+        } -TimeoutSec $httpTimeoutSec
     }
 
     if (-not $res.access_token) {
@@ -265,7 +274,7 @@ function Get-AsinMapByJanBatch {
                     'x-amz-access-token' = $AccessToken
                     'User-Agent'         = $userAgent
                     'Accept'             = 'application/json'
-                }
+                } -TimeoutSec $httpTimeoutSec
             }
         }
         catch {
@@ -345,7 +354,7 @@ function Get-PriceMapByAsinBatch {
                     'User-Agent'         = $userAgent
                     'Accept'             = 'application/json'
                     'Content-Type'       = 'application/json'
-                } -Body $body
+                } -Body $body -TimeoutSec $httpTimeoutSec
             }
         }
         catch {
