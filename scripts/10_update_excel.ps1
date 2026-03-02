@@ -9,6 +9,7 @@ $logDir = Join-Path $repoRoot 'logs'
 $logPath = Join-Path $logDir 'run.log'
 $cacheDir = Join-Path $repoRoot 'cache'
 $cachePath = Join-Path $cacheDir 'price_cache.json'
+$historyDir = Join-Path $cacheDir 'history'
 
 $marketplaceId = 'A1VC38T7YXB528'
 $spBase = 'https://sellingpartnerapi-fe.amazon.com'
@@ -24,6 +25,11 @@ if (-not (Test-Path $logDir)) {
 
 if (-not (Test-Path $cacheDir)) {
     New-Item -ItemType Directory -Path $cacheDir -Force | Out-Null
+}
+
+
+if (-not (Test-Path $historyDir)) {
+    New-Item -ItemType Directory -Path $historyDir -Force | Out-Null
 }
 
 function Write-Log {
@@ -448,6 +454,55 @@ function Save-PersistentCache {
     $rows | Sort-Object jan | ConvertTo-Json -Depth 5 | Set-Content -Path $Path -Encoding UTF8
 }
 
+
+function Append-DailyPriceHistory {
+    param(
+        [hashtable]$RunCache,
+        [string]$DirPath
+    )
+
+    if (-not (Test-Path $DirPath)) {
+        New-Item -ItemType Directory -Path $DirPath -Force | Out-Null
+    }
+
+    $fileName = "prices_$(Get-Date -Format 'yyyy-MM-dd').jsonl"
+    $historyPath = Join-Path $DirPath $fileName
+
+    $rows = New-Object System.Collections.Generic.List[string]
+    foreach ($jan in $RunCache.Keys) {
+        $entry = $RunCache[$jan]
+        if (-not $entry) {
+            continue
+        }
+
+        if ($entry.cache_status -ne 'ok') {
+            continue
+        }
+
+        if ($null -eq $entry.price -or "$($entry.price)" -eq '') {
+            continue
+        }
+
+        $record = [PSCustomObject]@{
+            logged_at   = (Get-Date).ToString('o')
+            fetched_at  = $entry.fetched_at
+            jan         = $jan
+            asin        = $entry.asin
+            price       = $entry.price
+            cache_status = $entry.cache_status
+        }
+
+        $rows.Add(($record | ConvertTo-Json -Compress -Depth 5)) | Out-Null
+    }
+
+    if ($rows.Count -eq 0) {
+        return 0
+    }
+
+    Add-Content -Path $historyPath -Value $rows -Encoding UTF8
+    return $rows.Count
+}
+
 function Is-CacheFresh {
     param(
         [object]$Entry,
@@ -570,10 +625,12 @@ try {
                     $notFoundValidationCount++
                 }
                 elseif ($catalogErrorMap.ContainsKey($jan) -and $catalogErrorMap[$jan] -eq 'RateLimit/Server') {
+                    $cacheStatus = 'transient_error'
                     $rateLimitServerCount++
                     $errorCount++
                 }
                 elseif ($catalogErrorMap.ContainsKey($jan)) {
+                    $cacheStatus = 'transient_error'
                     $otherErrorCount++
                     $errorCount++
                 }
@@ -594,10 +651,12 @@ try {
                         $notFoundValidationCount++
                     }
                     elseif ($errClass -eq 'RateLimit/Server') {
+                        $cacheStatus = 'transient_error'
                         $rateLimitServerCount++
                         $errorCount++
                     }
                     else {
+                        $cacheStatus = 'transient_error'
                         $otherErrorCount++
                         $errorCount++
                     }
@@ -615,17 +674,19 @@ try {
             if ($cacheStatus -eq 'not_found' -or $cacheStatus -eq 'ok') {
                 $persistentCache[$jan] = $entry
             }
+            elseif ($persistentCache.ContainsKey($jan)) {
+                $persistentCache.Remove($jan)
+            }
         }
     }
 
     for ($row = 2; $row -le $lastRow; $row++) {
-        $timestamp = (Get-Date).ToString('o')
         $jan = $janByRow[$row]
-        $sheet.Cells.Item($row, 9).Value2 = $timestamp
 
         if ([string]::IsNullOrWhiteSpace($jan)) {
             $sheet.Cells.Item($row, 7).Value2 = ''
             $sheet.Cells.Item($row, 8).Value2 = ''
+            $sheet.Cells.Item($row, 9).Value2 = ''
             continue
         }
 
@@ -635,6 +696,15 @@ try {
             if ($result -and $result.cache_status -eq 'not_found') {
                 $sheet.Cells.Item($row, 7).Value2 = ''
                 $sheet.Cells.Item($row, 8).Value2 = ''
+                $sheet.Cells.Item($row, 9).Value2 = ''
+                continue
+            }
+
+            if ($result -and $result.cache_status -eq 'transient_error') {
+                $sheet.Cells.Item($row, 7).Value2 = ''
+                $sheet.Cells.Item($row, 8).Value2 = ''
+                $sheet.Cells.Item($row, 9).Value2 = ''
+                Write-Log "行$row JAN=$jan は一時エラーのため空欄出力します。" 'WARN'
                 continue
             }
 
@@ -647,9 +717,16 @@ try {
 
             if ($result -and $null -ne $result.price -and "$($result.price)" -ne '') {
                 $sheet.Cells.Item($row, 8).Value2 = [double]$result.price
+                if ($result.fetched_at) {
+                    $sheet.Cells.Item($row, 9).Value2 = [string]$result.fetched_at
+                }
+                else {
+                    $sheet.Cells.Item($row, 9).Value2 = ''
+                }
             }
             else {
                 $sheet.Cells.Item($row, 8).Value2 = ''
+                $sheet.Cells.Item($row, 9).Value2 = ''
             }
         }
         catch {
@@ -667,6 +744,7 @@ try {
 
             $sheet.Cells.Item($row, 7).Value2 = ''
             $sheet.Cells.Item($row, 8).Value2 = ''
+            $sheet.Cells.Item($row, 9).Value2 = ''
             Write-Log "行$row JAN=$jan の処理でエラー: 分類=$($detail.Class), HTTP=$($detail.StatusCode), msg=$($_.Exception.Message)" 'ERROR'
         }
 
@@ -674,6 +752,8 @@ try {
     }
 
     Save-PersistentCache -CacheMap $persistentCache -Path $cachePath
+    $historySavedCount = Append-DailyPriceHistory -RunCache $runCache -DirPath $historyDir
+    Write-Log "価格履歴の追記件数: $historySavedCount"
 
     try {
         $workbook.SaveAs($outputPath)
