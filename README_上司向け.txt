@@ -16,6 +16,9 @@
 
 ■ 注意
 - 同じJANが複数行ある場合、API呼び出しは1回だけ行います。
+- JAN/価格の取得はバッチAPIでまとめて実行するため、件数が多いほど更新時間を短縮できます。
+- cache/price_cache.json に24時間の永続キャッシュを保持し、再実行時のAPI呼び出しを削減します。
+- 該当なし（NotFound/Validation）は negative cache として保持し、TTL内は再呼び出ししません。
 - エラーがあるJANは C/D を空欄のまま継続します（処理全体は止まりません）。
 - 詳細ログは logs\run.log を確認してください。
 - 認証情報は secrets\lwa_secrets.xml に暗号化保存されます（同じWindowsユーザーのみ利用可）。
