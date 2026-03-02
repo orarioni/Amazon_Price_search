@@ -53,6 +53,16 @@ function ConvertTo-PlainText {
     }
 }
 
+function Test-IsValidJan {
+    param([string]$Jan)
+
+    if ([string]::IsNullOrWhiteSpace($Jan)) {
+        return $false
+    }
+
+    return $Jan -match '^(\d{8}|\d{13})$'
+}
+
 function Classify-StatusAndBody {
     param(
         [Nullable[int]]$StatusCode,
@@ -565,25 +575,53 @@ try {
     $catalogApiCalls = 0
     $pricingApiCalls = 0
     $notFoundValidationCount = 0
+    $invalidJanCount = 0
     $rateLimitServerCount = 0
     $otherErrorCount = 0
 
     $janByRow = @{}
+    $janSet = New-Object System.Collections.Generic.HashSet[string]
     $targetJans = New-Object System.Collections.Generic.HashSet[string]
+    $invalidJans = New-Object System.Collections.Generic.HashSet[string]
 
     for ($row = 2; $row -le $lastRow; $row++) {
         $jan = ([string]$sheet.Cells.Item($row, 2).Text).Trim()
         $janByRow[$row] = $jan
 
         if (-not [string]::IsNullOrWhiteSpace($jan)) {
-            [void]$targetJans.Add($jan)
+            [void]$janSet.Add($jan)
+
+            if (Test-IsValidJan -Jan $jan) {
+                [void]$targetJans.Add($jan)
+            }
+            else {
+                [void]$invalidJans.Add($jan)
+            }
         }
     }
 
-    $janList = @($targetJans)
+    $janList = @($janSet)
     $needApiJans = @()
 
-    foreach ($jan in $janList) {
+    $fetchedAt = (Get-Date).ToString('o')
+
+    foreach ($jan in @($invalidJans)) {
+        $invalidJanCount++
+        $notFoundValidationCount++
+        $cacheMissCount++
+
+        $entry = [PSCustomObject]@{
+            asin         = $null
+            price        = $null
+            fetched_at   = $fetchedAt
+            cache_status = 'not_found'
+        }
+
+        $runCache[$jan] = $entry
+        $persistentCache[$jan] = $entry
+    }
+
+    foreach ($jan in @($targetJans)) {
         if ($persistentCache.ContainsKey($jan) -and (Is-CacheFresh -Entry $persistentCache[$jan] -TtlHours $cacheTtlHours)) {
             $runCache[$jan] = $persistentCache[$jan]
             $cacheHitCount++
@@ -618,7 +656,6 @@ try {
             $pricingApiCalls = (Split-IntoChunks -Items $distinctAsins -ChunkSize $pricingBatchSize).Count
         }
 
-        $fetchedAt = (Get-Date).ToString('o')
         foreach ($jan in $needApiJans) {
             $cacheStatus = 'ok'
             $asin = $asinMap[$jan]
@@ -768,7 +805,7 @@ try {
         throw
     }
 
-    Write-Log "呼び出し統計: JAN総数=$($janList.Count), cache_hit=$cacheHitCount, cache_miss=$cacheMissCount, catalog_calls=$catalogApiCalls, pricing_calls=$pricingApiCalls"
+    Write-Log "呼び出し統計: JAN総数=$($janList.Count), 無効JAN=$invalidJanCount, cache_hit=$cacheHitCount, cache_miss=$cacheMissCount, catalog_calls=$catalogApiCalls, pricing_calls=$pricingApiCalls"
     Write-Log "エラー分類統計: NotFound/Validation=$notFoundValidationCount, RateLimit/Server=$rateLimitServerCount, Other=$otherErrorCount"
     Write-Log "更新完了: 処理件数=$processed, エラー件数=$errorCount, 出力=$outputPath"
 }
