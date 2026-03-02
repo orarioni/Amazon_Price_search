@@ -369,14 +369,19 @@ function Get-PriceMapByAsinBatch {
                 }
             }
 
+            $moveToNextResponse = $false
             if (-not $asin -or -not $priceMap.ContainsKey($asin)) {
-                continue
+                $moveToNextResponse = $true
             }
-
-            if ($statusCode -ge 400) {
+            elseif ($statusCode -ge 400) {
+                # エラー分類を記録したら、このレスポンスの処理は終了して次へ進む。
                 $bodyText = if ($response.body) { ($response.body | ConvertTo-Json -Depth 8) } else { '' }
                 $detail = Classify-StatusAndBody -StatusCode $statusCode -BodyText $bodyText
                 $errorClassMap[$asin] = $detail.Class
+                $moveToNextResponse = $true
+            }
+
+            if ($moveToNextResponse) {
                 continue
             }
 
