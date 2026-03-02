@@ -621,11 +621,11 @@ try {
     for ($row = 2; $row -le $lastRow; $row++) {
         $timestamp = (Get-Date).ToString('o')
         $jan = $janByRow[$row]
-        $sheet.Cells.Item($row, 5).Value2 = $timestamp
+        $sheet.Cells.Item($row, 9).Value2 = $timestamp
 
         if ([string]::IsNullOrWhiteSpace($jan)) {
-            $sheet.Cells.Item($row, 3).Value2 = ''
-            $sheet.Cells.Item($row, 4).Value2 = ''
+            $sheet.Cells.Item($row, 7).Value2 = ''
+            $sheet.Cells.Item($row, 8).Value2 = ''
             continue
         }
 
@@ -633,23 +633,23 @@ try {
             $result = $runCache[$jan]
 
             if ($result -and $result.cache_status -eq 'not_found') {
-                $sheet.Cells.Item($row, 3).Value2 = ''
-                $sheet.Cells.Item($row, 4).Value2 = ''
+                $sheet.Cells.Item($row, 7).Value2 = ''
+                $sheet.Cells.Item($row, 8).Value2 = ''
                 continue
             }
 
             if ($result -and $result.asin) {
-                $sheet.Cells.Item($row, 3).Value2 = $result.asin
+                $sheet.Cells.Item($row, 7).Value2 = $result.asin
             }
             else {
-                $sheet.Cells.Item($row, 3).Value2 = ''
+                $sheet.Cells.Item($row, 7).Value2 = ''
             }
 
             if ($result -and $null -ne $result.price -and "$($result.price)" -ne '') {
-                $sheet.Cells.Item($row, 4).Value2 = [double]$result.price
+                $sheet.Cells.Item($row, 8).Value2 = [double]$result.price
             }
             else {
-                $sheet.Cells.Item($row, 4).Value2 = ''
+                $sheet.Cells.Item($row, 8).Value2 = ''
             }
         }
         catch {
@@ -665,8 +665,8 @@ try {
                 $otherErrorCount++
             }
 
-            $sheet.Cells.Item($row, 3).Value2 = ''
-            $sheet.Cells.Item($row, 4).Value2 = ''
+            $sheet.Cells.Item($row, 7).Value2 = ''
+            $sheet.Cells.Item($row, 8).Value2 = ''
             Write-Log "行$row JAN=$jan の処理でエラー: 分類=$($detail.Class), HTTP=$($detail.StatusCode), msg=$($_.Exception.Message)" 'ERROR'
         }
 
