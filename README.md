@@ -88,7 +88,7 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 ### 永続キャッシュ
 
 - ファイル: `cache/price_cache.json`
-- TTL: 24時間（`scripts/10_update_excel.ps1` の `$cacheTtlHours`）
+- TTL: 24時間（`config.psd1` の `CacheTtlHours`）
 - `ok` / `not_found` はキャッシュ保持
 - `transient_error` は永続化しない（次回再取得）
 
@@ -164,8 +164,10 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 
 - `run_init.bat` : 初期認証情報登録の起動
 - `run_update.bat` : 更新処理の起動
-- `scripts/00_init_secrets.ps1` : 認証情報入力・保存
-- `scripts/10_update_excel.ps1` : メイン処理（取得/キャッシュ/出力）
+- `config.psd1` : 環境設定（マーケットプレイス、TTL、各パス等）
+- `scripts/00_init_secrets.ps1` : 薄い実行スクリプト（入力→保存）
+- `scripts/10_update_excel.ps1` : 薄い実行スクリプト（設定読込→実行）
+- `scripts/lib/AmazonPriceLib.psm1` : 共通ライブラリ（認証、SP-API、リトライ、キャッシュ、Excel出力）
 - `data/` : 入出力Excel配置場所（`input.xlsx` / `output.xlsx`）
 - `cache/` : 永続キャッシュ・履歴
 - `logs/` : 実行ログ
