@@ -3,7 +3,9 @@
 ■ 初回だけ実施
 1) Excelを閉じる
 2) run_init.bat をダブルクリック
-3) client_id / client_secret / refresh_token を入力して保存完了メッセージを確認
+3) client_id / client_secret / refresh_token を入力
+4) 必要に応じて AWS認証情報（aws_access_key_id / aws_secret_access_key / aws_session_token）も登録
+5) 保存完了メッセージを確認
 
 ■ 毎回の更新手順
 1) data\input.xlsx を更新（JANコードは B列、1行目は見出し）
@@ -15,6 +17,7 @@
    - E列: 取得日時（ISO 8601）
 
 ■ 注意
+- SP-APIで401/403が出る場合は、run_init.bat を再実行してAWS認証情報も登録してください。
 - 同じJANが複数行ある場合、API呼び出しは1回だけ行います。
 - エラーがあるJANは C/D を空欄のまま継続します（処理全体は止まりません）。
 - 詳細ログは logs\run.log を確認してください。
