@@ -14,6 +14,7 @@ $awsRegion = 'us-west-2'
 $awsService = 'execute-api'
 $userAgent = 'AmazonPriceTool/0.1'
 $maxRetries = 4
+$pricingBatchSize = 20
 
 if (-not (Test-Path $logDir)) {
     New-Item -ItemType Directory -Path $logDir -Force | Out-Null
@@ -266,7 +267,15 @@ function Get-LowestNewPrice {
         Invoke-RestMethod -Method Get -Uri $uri -Headers $headers
     }
 
-    if (-not $res.payload -or -not $res.payload.Offers) {
+    return Get-LowestPriceFromOffers -Offers $res.payload.Offers
+}
+
+function Get-LowestPriceFromOffers {
+    param(
+        [object[]]$Offers
+    )
+
+    if (-not $Offers) {
         return $null
     }
 
@@ -274,7 +283,7 @@ function Get-LowestNewPrice {
     $landedMin = $null
     $fallbackMin = $null
 
-    foreach ($offer in $res.payload.Offers) {
+    foreach ($offer in $Offers) {
         if ($offer.LandedPrice -and $null -ne $offer.LandedPrice.Amount) {
             $landed = [decimal]$offer.LandedPrice.Amount
             if ($null -eq $landedMin -or $landed -lt $landedMin) {
@@ -296,6 +305,85 @@ function Get-LowestNewPrice {
     }
 
     return $fallbackMin
+}
+
+function Get-LowestNewPriceMapBatch {
+    param(
+        [string[]]$Asins,
+        [string]$AccessToken,
+        [string]$AwsAccessKeyId,
+        [string]$AwsSecretAccessKey,
+        [string]$AwsSessionToken,
+        [int]$ChunkSize = 20
+    )
+
+    $priceMap = @{}
+    if (-not $Asins -or $Asins.Count -eq 0) {
+        return $priceMap
+    }
+
+    for ($i = 0; $i -lt $Asins.Count; $i += $ChunkSize) {
+        $endIndex = [Math]::Min($i + $ChunkSize - 1, $Asins.Count - 1)
+        $chunk = @($Asins[$i..$endIndex])
+
+        $requests = @()
+        foreach ($asin in $chunk) {
+            $requestUri = "/products/pricing/v0/items/$([Uri]::EscapeDataString($asin))/offers?MarketplaceId=$marketplaceId&ItemCondition=New"
+            $requests += @{
+                uri           = $requestUri
+                method        = 'GET'
+                MarketplaceId = $marketplaceId
+                ItemCondition = 'New'
+            }
+        }
+
+        $uri = "$spBase/batches/products/pricing/v0/itemOffers"
+        $body = @{ requests = $requests } | ConvertTo-Json -Depth 10
+
+        try {
+            $res = Invoke-WithRetry -Label "Pricing batch取得 ASIN=$($chunk -join ',')" -Action {
+                $headers = New-SpApiAuthHeaders -Method 'POST' -Uri $uri -AccessToken $AccessToken -AwsAccessKeyId $AwsAccessKeyId -AwsSecretAccessKey $AwsSecretAccessKey -AwsSessionToken $AwsSessionToken
+                $headers['Content-Type'] = 'application/json'
+                Invoke-RestMethod -Method Post -Uri $uri -Headers $headers -Body $body
+            }
+
+            foreach ($asin in $chunk) {
+                $priceMap[$asin] = $null
+            }
+
+            $responses = @($res.responses)
+            foreach ($response in $responses) {
+                $statusCode = [int]$response.status.statusCode
+                $responseAsin = $response.body.payload.ASIN
+
+                if ([string]::IsNullOrWhiteSpace($responseAsin)) {
+                    if ($response.request.uri -match '/items/([^/]+)/offers') {
+                        $responseAsin = [Uri]::UnescapeDataString($Matches[1])
+                    }
+                }
+
+                if ([string]::IsNullOrWhiteSpace($responseAsin) -or -not $priceMap.ContainsKey($responseAsin)) {
+                    continue
+                }
+
+                if ($statusCode -ge 200 -and $statusCode -lt 300) {
+                    $priceMap[$responseAsin] = Get-LowestPriceFromOffers -Offers $response.body.payload.Offers
+                }
+                else {
+                    Write-Log "Pricing batch内エラー ASIN=$responseAsin HTTP=$statusCode" 'WARN'
+                    $priceMap[$responseAsin] = $null
+                }
+            }
+        }
+        catch {
+            Write-Log "Pricing batch取得失敗 (ASINチャンク: $($chunk -join ',')): $($_.Exception.Message)" 'ERROR'
+            foreach ($asin in $chunk) {
+                $priceMap[$asin] = $null
+            }
+        }
+    }
+
+    return $priceMap
 }
 
 if (-not (Test-Path $secretFile)) {
@@ -335,7 +423,8 @@ try {
     $sheet = $workbook.Worksheets.Item(1)
     $lastRow = $sheet.Cells($sheet.Rows.Count, 2).End(-4162).Row
 
-    $cache = @{}
+    $rowInfoList = New-Object System.Collections.Generic.List[object]
+    $janToAsinMap = @{}
     $processed = 0
     $errorCount = 0
 
@@ -352,44 +441,50 @@ try {
             continue
         }
 
+        $rowInfoList.Add([PSCustomObject]@{ row = $row; jan = $jan }) | Out-Null
+
+        if ($janToAsinMap.ContainsKey($jan)) {
+            continue
+        }
+
         try {
-            if ($cache.ContainsKey($jan)) {
-                $result = $cache[$jan]
-            }
-            else {
-                $asin = Get-AsinByJan -Jan $jan -AccessToken $accessToken -AwsAccessKeyId $awsAccessKeyId -AwsSecretAccessKey $awsSecretAccessKey -AwsSessionToken $awsSessionToken
-                if ($asin) {
-                    $price = Get-LowestNewPrice -Asin $asin -AccessToken $accessToken -AwsAccessKeyId $awsAccessKeyId -AwsSecretAccessKey $awsSecretAccessKey -AwsSessionToken $awsSessionToken
-                    $result = [PSCustomObject]@{ asin = $asin; price = $price }
-                }
-                else {
-                    $result = [PSCustomObject]@{ asin = $null; price = $null }
-                }
-                $cache[$jan] = $result
-            }
-
-            if ($result.asin) {
-                $sheet.Cells.Item($row, 3).Value2 = $result.asin
-            }
-            else {
-                $sheet.Cells.Item($row, 3).Value2 = ''
-            }
-
-            if ($null -ne $result.price) {
-                $sheet.Cells.Item($row, 4).Value2 = [double]$result.price
-            }
-            else {
-                $sheet.Cells.Item($row, 4).Value2 = ''
-            }
+            $janToAsinMap[$jan] = Get-AsinByJan -Jan $jan -AccessToken $accessToken -AwsAccessKeyId $awsAccessKeyId -AwsSecretAccessKey $awsSecretAccessKey -AwsSessionToken $awsSessionToken
         }
         catch {
             $errorCount++
-            $sheet.Cells.Item($row, 3).Value2 = ''
-            $sheet.Cells.Item($row, 4).Value2 = ''
-            Write-Log "行$row JAN=$jan の処理でエラー: $($_.Exception.Message)" 'ERROR'
+            $janToAsinMap[$jan] = $null
+            Write-Log "JAN=$jan のASIN取得でエラー: $($_.Exception.Message)" 'ERROR'
         }
 
         $processed++
+    }
+
+    $uniqueAsins = @($janToAsinMap.Values | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
+    $asinToPriceMap = Get-LowestNewPriceMapBatch -Asins $uniqueAsins -AccessToken $accessToken -AwsAccessKeyId $awsAccessKeyId -AwsSecretAccessKey $awsSecretAccessKey -AwsSessionToken $awsSessionToken -ChunkSize $pricingBatchSize
+
+    foreach ($rowInfo in $rowInfoList) {
+        $row = $rowInfo.row
+        $jan = $rowInfo.jan
+        $asin = $janToAsinMap[$jan]
+
+        if ($asin) {
+            $sheet.Cells.Item($row, 3).Value2 = $asin
+        }
+        else {
+            $sheet.Cells.Item($row, 3).Value2 = ''
+        }
+
+        $price = $null
+        if ($asin -and $asinToPriceMap.ContainsKey($asin)) {
+            $price = $asinToPriceMap[$asin]
+        }
+
+        if ($null -ne $price) {
+            $sheet.Cells.Item($row, 4).Value2 = [double]$price
+        }
+        else {
+            $sheet.Cells.Item($row, 4).Value2 = ''
+        }
     }
 
     try {
