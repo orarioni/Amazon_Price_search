@@ -26,7 +26,7 @@
 - invalid_grant:
   refresh_token の期限切れ/誤入力の可能性があります。run_init.bat で認証情報を再登録してください。
 - 401/403:
-  AWS SigV4署名に使う IAM 認証情報（aws_access_key_id / aws_secret_access_key / aws_session_token）やSP-API権限を確認してください。
+  SP-API は LWA トークン単体では認証できません。x-amz-access-token と AWS SigV4 署名（aws_access_key_id / aws_secret_access_key / aws_session_token）を併用できているか、SP-API権限と合わせて確認してください。
 
 
 ■ 実機テスト手順

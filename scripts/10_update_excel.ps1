@@ -156,6 +156,21 @@ function Get-CanonicalQueryString {
     return (($pairs | Sort-Object Key, Value | ForEach-Object { "{0}={1}" -f $_.Key, $_.Value }) -join '&')
 }
 
+function Get-CanonicalUri {
+    param([uri]$Uri)
+
+    if ([string]::IsNullOrEmpty($Uri.AbsolutePath) -or $Uri.AbsolutePath -eq '/') {
+        return '/'
+    }
+
+    $segments = $Uri.AbsolutePath -split '/'
+    $encoded = foreach ($segment in $segments) {
+        ConvertTo-SigV4Encoded -Value ([Uri]::UnescapeDataString($segment))
+    }
+
+    return ($encoded -join '/')
+}
+
 function New-SpApiAuthHeaders {
     param(
         [string]$Method,
@@ -171,12 +186,13 @@ function New-SpApiAuthHeaders {
     $dateStamp = (Get-Date).ToUniversalTime().ToString('yyyyMMdd')
     $payloadHash = Get-Sha256Hex -Text ''
 
-    $canonicalUri = if ([string]::IsNullOrEmpty($requestUri.AbsolutePath)) { '/' } else { $requestUri.AbsolutePath }
+    $canonicalUri = Get-CanonicalUri -Uri $requestUri
     $canonicalQueryString = Get-CanonicalQueryString -Uri $requestUri
 
     $headers = [ordered]@{
         host                 = $requestUri.Host
         'x-amz-access-token' = $AccessToken
+        'x-amz-content-sha256' = $payloadHash
         'x-amz-date'         = $amzDate
     }
     if (-not [string]::IsNullOrWhiteSpace($AwsSessionToken)) {
@@ -215,6 +231,7 @@ function New-SpApiAuthHeaders {
     $requestHeaders = @{
         'Authorization'      = $authorizationHeader
         'x-amz-access-token' = $AccessToken
+        'x-amz-content-sha256' = $payloadHash
         'x-amz-date'         = $amzDate
         'User-Agent'         = $userAgent
         'Accept'             = 'application/json'
