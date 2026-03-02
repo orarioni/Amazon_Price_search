@@ -14,18 +14,10 @@ $clientSecret = Read-Host 'client_secret' -AsSecureString
 $refreshToken = Read-Host 'refresh_token' -AsSecureString
 
 Write-Host ''
-Write-Host 'SP-APIで SigV4 を使う場合、AWS認証情報を登録できます（推奨）。'
-$useSigV4 = Read-Host 'AWS認証情報を登録しますか？ (y/N)'
-
-$awsAccessKeyId = $null
-$awsSecretAccessKey = $null
-$awsSessionToken = $null
-
-if ($useSigV4 -match '^(y|Y)$') {
-    $awsAccessKeyId = Read-Host 'aws_access_key_id'
-    $awsSecretAccessKey = Read-Host 'aws_secret_access_key' -AsSecureString
-    $awsSessionToken = Read-Host 'aws_session_token (不要なら空欄でEnter)'
-}
+Write-Host 'SP-API呼び出しにはAWS SigV4認証情報が必須です。'
+$awsAccessKeyId = Read-Host 'aws_access_key_id'
+$awsSecretAccessKey = Read-Host 'aws_secret_access_key' -AsSecureString
+$awsSessionToken = Read-Host 'aws_session_token (不要なら空欄でEnter)'
 
 $payload = [PSCustomObject]@{
     client_id             = $clientId

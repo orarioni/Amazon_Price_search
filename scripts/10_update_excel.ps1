@@ -128,8 +128,7 @@ function New-SpApiHeaders {
     }
 
     if ([string]::IsNullOrWhiteSpace($AwsAccessKeyId) -or [string]::IsNullOrWhiteSpace($AwsSecretAccessKey)) {
-        $headers['Authorization'] = "Bearer $AccessToken"
-        return $headers
+        throw 'AWS認証情報 (aws_access_key_id / aws_secret_access_key) が未設定です。SP-API呼び出しにはSigV4署名が必須です。run_init.bat を再実行して設定してください。'
     }
 
     $amzDate = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
@@ -322,11 +321,11 @@ $awsSecretAccessKey = ConvertTo-PlainText -Secure $secret.aws_secret_access_key
 $awsSessionToken = $secret.aws_session_token
 
 if ([string]::IsNullOrWhiteSpace($awsAccessKeyId) -or [string]::IsNullOrWhiteSpace($awsSecretAccessKey)) {
-    Write-Log 'AWS認証情報が未登録のため、BearerモードでSP-APIを呼び出します。401/403が出る場合は run_init.bat でAWS認証情報を登録してください。' 'WARN'
+    Write-Host 'AWS認証情報が未設定です。SP-APIはSigV4署名が必須です。run_init.bat を再実行して aws_access_key_id / aws_secret_access_key を登録してください。'
+    exit 1
 }
-else {
-    Write-Log 'AWS SigV4 署名付きでSP-APIを呼び出します。'
-}
+
+Write-Log 'AWS SigV4 署名付きでSP-APIを呼び出します。'
 
 Write-Log '更新処理を開始します。'
 $accessToken = Get-LwaAccessToken -ClientId $clientId -ClientSecret $clientSecret -RefreshToken $refreshToken
