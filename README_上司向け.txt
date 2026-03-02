@@ -10,9 +10,9 @@
 2) Excelを閉じる
 3) run_update.bat を実行
 4) data\output.xlsx に結果が出力される
-   - C列: ASIN
-   - D列: 新品 送料込み最安
-   - E列: 取得日時（ISO 8601）
+   - G列: ASIN
+   - H列: 新品 送料込み最安
+   - I列: 取得日時（ISO 8601）
 
 ■ 注意
 - 同じJANが複数行ある場合、API呼び出しは1回だけ行います。

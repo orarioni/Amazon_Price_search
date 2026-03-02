@@ -15,6 +15,10 @@ $awsService = 'execute-api'
 $userAgent = 'AmazonPriceTool/0.1'
 $maxRetries = 4
 
+$asinCol = 7
+$priceCol = 8
+$timestampCol = 9
+
 if (-not (Test-Path $logDir)) {
     New-Item -ItemType Directory -Path $logDir -Force | Out-Null
 }
@@ -361,11 +365,11 @@ try {
         $jan = [string]$sheet.Cells.Item($row, 2).Text
         $jan = $jan.Trim()
 
-        $sheet.Cells.Item($row, 5).Value2 = $timestamp
+        $sheet.Cells.Item($row, $timestampCol).Value2 = $timestamp
 
         if ([string]::IsNullOrWhiteSpace($jan)) {
-            $sheet.Cells.Item($row, 3).Value2 = ''
-            $sheet.Cells.Item($row, 4).Value2 = ''
+            $sheet.Cells.Item($row, $asinCol).Value2 = ''
+            $sheet.Cells.Item($row, $priceCol).Value2 = ''
             continue
         }
 
@@ -386,23 +390,23 @@ try {
             }
 
             if ($result.asin) {
-                $sheet.Cells.Item($row, 3).Value2 = $result.asin
+                $sheet.Cells.Item($row, $asinCol).Value2 = $result.asin
             }
             else {
-                $sheet.Cells.Item($row, 3).Value2 = ''
+                $sheet.Cells.Item($row, $asinCol).Value2 = ''
             }
 
             if ($null -ne $result.price) {
-                $sheet.Cells.Item($row, 4).Value2 = [double]$result.price
+                $sheet.Cells.Item($row, $priceCol).Value2 = [double]$result.price
             }
             else {
-                $sheet.Cells.Item($row, 4).Value2 = ''
+                $sheet.Cells.Item($row, $priceCol).Value2 = ''
             }
         }
         catch {
             $errorCount++
-            $sheet.Cells.Item($row, 3).Value2 = ''
-            $sheet.Cells.Item($row, 4).Value2 = ''
+            $sheet.Cells.Item($row, $asinCol).Value2 = ''
+            $sheet.Cells.Item($row, $priceCol).Value2 = ''
             Write-Log "行$row JAN=$jan の処理でエラー: $($_.Exception.Message)" 'ERROR'
         }
 
