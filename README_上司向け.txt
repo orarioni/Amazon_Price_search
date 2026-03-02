@@ -3,7 +3,7 @@
 ■ 初回だけ実施
 1) Excelを閉じる
 2) run_init.bat をダブルクリック
-3) client_id / client_secret / refresh_token を入力して保存完了メッセージを確認
+3) client_id / client_secret / refresh_token / aws_access_key_id / aws_secret_access_key（必要なら aws_session_token）を入力して保存完了メッセージを確認
 
 ■ 毎回の更新手順
 1) data\input.xlsx を更新（JANコードは B列、1行目は見出し）
@@ -25,6 +25,8 @@
   Excelが開いたままの可能性があります。Excelをすべて閉じて再実行してください。
 - invalid_grant:
   refresh_token の期限切れ/誤入力の可能性があります。run_init.bat で認証情報を再登録してください。
+- 401/403:
+  AWS SigV4署名に使う IAM 認証情報（aws_access_key_id / aws_secret_access_key / aws_session_token）やSP-API権限を確認してください。
 
 
 ■ 実機テスト手順

@@ -10,6 +10,8 @@ $logPath = Join-Path $logDir 'run.log'
 
 $marketplaceId = 'A1VC38T7YXB528'
 $spBase = 'https://sellingpartnerapi-fe.amazon.com'
+$awsRegion = 'us-west-2'
+$awsService = 'execute-api'
 $userAgent = 'AmazonPriceTool/0.1'
 $maxRetries = 4
 
@@ -95,21 +97,150 @@ function Get-LwaAccessToken {
     return $res.access_token
 }
 
+function Get-Sha256Hex {
+    param([string]$Text)
+    $bytes = [Text.Encoding]::UTF8.GetBytes($Text)
+    $hash = [Security.Cryptography.SHA256]::Create().ComputeHash($bytes)
+    return ([BitConverter]::ToString($hash)).Replace('-', '').ToLowerInvariant()
+}
+
+function Get-HmacSha256 {
+    param(
+        [byte[]]$Key,
+        [string]$Data
+    )
+
+    $hmac = [Security.Cryptography.HMACSHA256]::new($Key)
+    try {
+        $bytes = [Text.Encoding]::UTF8.GetBytes($Data)
+        return $hmac.ComputeHash($bytes)
+    }
+    finally {
+        $hmac.Dispose()
+    }
+}
+
+function ConvertTo-SigV4Encoded {
+    param([string]$Value)
+
+    if ($null -eq $Value) {
+        return ''
+    }
+
+    return [Uri]::EscapeDataString($Value).Replace('+', '%20').Replace('*', '%2A').Replace('%7E', '~')
+}
+
+function Get-CanonicalQueryString {
+    param([uri]$Uri)
+
+    $query = $Uri.Query.TrimStart('?')
+    if ([string]::IsNullOrEmpty($query)) {
+        return ''
+    }
+
+    $pairs = @()
+    foreach ($part in ($query -split '&')) {
+        if ($part -eq '') {
+            continue
+        }
+
+        $kv = $part -split '=', 2
+        $keyRaw = [Uri]::UnescapeDataString($kv[0])
+        $valueRaw = if ($kv.Count -gt 1) { [Uri]::UnescapeDataString($kv[1]) } else { '' }
+        $pairs += [PSCustomObject]@{
+            Key = ConvertTo-SigV4Encoded -Value $keyRaw
+            Value = ConvertTo-SigV4Encoded -Value $valueRaw
+        }
+    }
+
+    return (($pairs | Sort-Object Key, Value | ForEach-Object { "{0}={1}" -f $_.Key, $_.Value }) -join '&')
+}
+
+function New-SpApiAuthHeaders {
+    param(
+        [string]$Method,
+        [string]$Uri,
+        [string]$AccessToken,
+        [string]$AwsAccessKeyId,
+        [string]$AwsSecretAccessKey,
+        [string]$AwsSessionToken
+    )
+
+    $requestUri = [uri]$Uri
+    $amzDate = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
+    $dateStamp = (Get-Date).ToUniversalTime().ToString('yyyyMMdd')
+    $payloadHash = Get-Sha256Hex -Text ''
+
+    $canonicalUri = if ([string]::IsNullOrEmpty($requestUri.AbsolutePath)) { '/' } else { $requestUri.AbsolutePath }
+    $canonicalQueryString = Get-CanonicalQueryString -Uri $requestUri
+
+    $headers = [ordered]@{
+        host                 = $requestUri.Host
+        'x-amz-access-token' = $AccessToken
+        'x-amz-date'         = $amzDate
+    }
+    if (-not [string]::IsNullOrWhiteSpace($AwsSessionToken)) {
+        $headers['x-amz-security-token'] = $AwsSessionToken
+    }
+
+    $canonicalHeaders = (($headers.GetEnumerator() | Sort-Object Name | ForEach-Object { "{0}:{1}" -f $_.Name.ToLowerInvariant(), $_.Value.Trim() }) -join "`n") + "`n"
+    $signedHeaders = ($headers.Keys | Sort-Object | ForEach-Object { $_.ToLowerInvariant() }) -join ';'
+
+    $canonicalRequest = @(
+        $Method.ToUpperInvariant()
+        $canonicalUri
+        $canonicalQueryString
+        $canonicalHeaders
+        $signedHeaders
+        $payloadHash
+    ) -join "`n"
+
+    $credentialScope = "$dateStamp/$awsRegion/$awsService/aws4_request"
+    $stringToSign = @(
+        'AWS4-HMAC-SHA256'
+        $amzDate
+        $credentialScope
+        (Get-Sha256Hex -Text $canonicalRequest)
+    ) -join "`n"
+
+    $kDate = Get-HmacSha256 -Key ([Text.Encoding]::UTF8.GetBytes("AWS4$AwsSecretAccessKey")) -Data $dateStamp
+    $kRegion = Get-HmacSha256 -Key $kDate -Data $awsRegion
+    $kService = Get-HmacSha256 -Key $kRegion -Data $awsService
+    $kSigning = Get-HmacSha256 -Key $kService -Data 'aws4_request'
+    $signatureBytes = Get-HmacSha256 -Key $kSigning -Data $stringToSign
+    $signature = ([BitConverter]::ToString($signatureBytes)).Replace('-', '').ToLowerInvariant()
+
+    $authorizationHeader = "AWS4-HMAC-SHA256 Credential=$AwsAccessKeyId/$credentialScope, SignedHeaders=$signedHeaders, Signature=$signature"
+
+    $requestHeaders = @{
+        'Authorization'      = $authorizationHeader
+        'x-amz-access-token' = $AccessToken
+        'x-amz-date'         = $amzDate
+        'User-Agent'         = $userAgent
+        'Accept'             = 'application/json'
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($AwsSessionToken)) {
+        $requestHeaders['x-amz-security-token'] = $AwsSessionToken
+    }
+
+    return $requestHeaders
+}
+
 function Get-AsinByJan {
     param(
         [string]$Jan,
-        [string]$AccessToken
+        [string]$AccessToken,
+        [string]$AwsAccessKeyId,
+        [string]$AwsSecretAccessKey,
+        [string]$AwsSessionToken
     )
 
     $uri = "$spBase/catalog/2022-04-01/items?identifiers=$([Uri]::EscapeDataString($Jan))&identifiersType=EAN&marketplaceIds=$marketplaceId"
 
     $res = Invoke-WithRetry -Label "Catalog取得 JAN=$Jan" -Action {
-        Invoke-RestMethod -Method Get -Uri $uri -Headers @{
-            'Authorization'               = "Bearer $AccessToken"
-            'x-amz-access-token'          = $AccessToken
-            'User-Agent'                  = $userAgent
-            'Accept'                      = 'application/json'
-        }
+        $headers = New-SpApiAuthHeaders -Method 'GET' -Uri $uri -AccessToken $AccessToken -AwsAccessKeyId $AwsAccessKeyId -AwsSecretAccessKey $AwsSecretAccessKey -AwsSessionToken $AwsSessionToken
+        Invoke-RestMethod -Method Get -Uri $uri -Headers $headers
     }
 
     if ($res.items -and $res.items.Count -gt 0) {
@@ -122,18 +253,17 @@ function Get-AsinByJan {
 function Get-LowestNewPrice {
     param(
         [string]$Asin,
-        [string]$AccessToken
+        [string]$AccessToken,
+        [string]$AwsAccessKeyId,
+        [string]$AwsSecretAccessKey,
+        [string]$AwsSessionToken
     )
 
     $uri = "$spBase/products/pricing/v0/items/$([Uri]::EscapeDataString($Asin))/offers?MarketplaceId=$marketplaceId&ItemCondition=New"
 
     $res = Invoke-WithRetry -Label "Pricing取得 ASIN=$Asin" -Action {
-        Invoke-RestMethod -Method Get -Uri $uri -Headers @{
-            'Authorization'      = "Bearer $AccessToken"
-            'x-amz-access-token' = $AccessToken
-            'User-Agent'         = $userAgent
-            'Accept'             = 'application/json'
-        }
+        $headers = New-SpApiAuthHeaders -Method 'GET' -Uri $uri -AccessToken $AccessToken -AwsAccessKeyId $AwsAccessKeyId -AwsSecretAccessKey $AwsSecretAccessKey -AwsSessionToken $AwsSessionToken
+        Invoke-RestMethod -Method Get -Uri $uri -Headers $headers
     }
 
     if (-not $res.payload -or -not $res.payload.Offers) {
@@ -182,6 +312,13 @@ $secret = Import-Clixml -Path $secretFile
 $clientId = $secret.client_id
 $clientSecret = ConvertTo-PlainText -Secure $secret.client_secret
 $refreshToken = ConvertTo-PlainText -Secure $secret.refresh_token
+$awsAccessKeyId = $secret.aws_access_key_id
+$awsSecretAccessKey = ConvertTo-PlainText -Secure $secret.aws_secret_access_key
+$awsSessionToken = $secret.aws_session_token
+
+if ([string]::IsNullOrWhiteSpace($awsAccessKeyId) -or [string]::IsNullOrWhiteSpace($awsSecretAccessKey)) {
+    throw 'AWS認証情報が secrets/lwa_secrets.xml に設定されていません。run_init.bat を再実行して aws_access_key_id / aws_secret_access_key を登録してください。'
+}
 
 Write-Log '更新処理を開始します。'
 $accessToken = Get-LwaAccessToken -ClientId $clientId -ClientSecret $clientSecret -RefreshToken $refreshToken
@@ -220,9 +357,9 @@ try {
                 $result = $cache[$jan]
             }
             else {
-                $asin = Get-AsinByJan -Jan $jan -AccessToken $accessToken
+                $asin = Get-AsinByJan -Jan $jan -AccessToken $accessToken -AwsAccessKeyId $awsAccessKeyId -AwsSecretAccessKey $awsSecretAccessKey -AwsSessionToken $awsSessionToken
                 if ($asin) {
-                    $price = Get-LowestNewPrice -Asin $asin -AccessToken $accessToken
+                    $price = Get-LowestNewPrice -Asin $asin -AccessToken $accessToken -AwsAccessKeyId $awsAccessKeyId -AwsSecretAccessKey $awsSecretAccessKey -AwsSessionToken $awsSessionToken
                     $result = [PSCustomObject]@{ asin = $asin; price = $price }
                 }
                 else {

@@ -6,7 +6,7 @@
 事前準備:
 1) このリポジトリをPC上の任意フォルダに配置（例: デスクトップ配下）
 2) Microsoft Excel（デスクトップ版）が起動できることを確認
-3) SP-API用の client_id / client_secret / refresh_token を手元に用意
+3) SP-API用の client_id / client_secret / refresh_token と AWS IAM の aws_access_key_id / aws_secret_access_key（必要なら aws_session_token）を手元に用意
 4) Excelをすべて閉じる
 
 ----------------------------------------
@@ -17,7 +17,10 @@
 2) 画面の指示に従い client_id を入力
 3) client_secret を入力（表示されません）
 4) refresh_token を入力（表示されません）
-5) 「保存完了」メッセージを確認
+5) aws_access_key_id を入力
+6) aws_secret_access_key を入力（表示されません）
+7) aws_session_token を入力（任意、不要なら空欄のままEnter）
+8) 「保存完了」メッセージを確認
 
 期待結果:
 - secrets\lwa_secrets.xml が作成される
@@ -72,5 +75,5 @@
 [ ] run_init.bat が完了し secrets\lwa_secrets.xml が生成される
 [ ] run_update.bat で output.xlsx が生成される
 [ ] エラー行があっても全体処理が継続する
-[ ] 主要トラブル（Excel開きっぱなし / invalid_grant）の対処が運用者で可能
+[ ] 主要トラブル（Excel開きっぱなし / invalid_grant / 401/403）の対処が運用者で可能
 
