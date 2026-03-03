@@ -3,9 +3,15 @@
     SpApiBaseUrl      = 'https://sellingpartnerapi-fe.amazon.com'
     UserAgent         = 'AmazonPriceTool/0.4'
     MaxRetries        = 4
+    RetryMaxAttempts   = 6
+    RetryMaxWaitSec    = 120
     CatalogBatchSize  = 20
     PricingBatchSize  = 20
     PricingSingleFallbackThreshold = 3
+    PricingMinIntervalSec = 2.2
+    JanAsinCacheTtlHours = 168
+    OfferCacheTtlHours   = 24
+    NegativeCacheTtlHours = 12
     CacheTtlHours     = 24
 
     Paths = @{
