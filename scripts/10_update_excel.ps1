@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 
 try {
     $repoRoot = Resolve-Path (Join-Path $PSScriptRoot '..')

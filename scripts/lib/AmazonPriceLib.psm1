@@ -1,4 +1,4 @@
-Set-StrictMode -Version Latest
+﻿Set-StrictMode -Version Latest
 
 function ConvertTo-PlainText {
     param([SecureString]$Secure)
@@ -20,7 +20,10 @@ function Write-Log {
 
     $line = "$(Get-Date -Format o) [$Level] $Message"
     Add-Content -Path $LogPath -Value $line
-    Write-Host $line
+    # suppress WARN messages on console to reduce noise
+    if ($Level -ne 'WARN') {
+        Write-Host $line
+    }
 }
 
 
@@ -121,9 +124,13 @@ function Invoke-SpApiRequest {
             if ($Endpoint -match '^PricingBatch') { $script:RunStats.PricingBatchCalls++ }
             if ($Endpoint -match '^CatalogBatch') { $script:RunStats.CatalogBatchCalls++ }
 
-            $params = @{ Method = $Method; Uri = $Uri; Headers = $Headers; ResponseHeadersVariable = 'responseHeaders' }
+            # PS5.1 doesn't support -ResponseHeadersVariable; use Invoke-WebRequest
+            $params = @{ Method = $Method; Uri = $Uri; Headers = $Headers }
             if ($null -ne $Body -and "$Body" -ne '') { $params.Body = $Body }
-            $res = Invoke-RestMethod @params
+            $raw = Invoke-WebRequest @params
+            $responseHeaders = $raw.Headers
+            # attempt to parse body as JSON
+            try { $res = $raw.Content | ConvertFrom-Json } catch { $res = $null }
 
             $limit = Get-HeaderValue -Headers $responseHeaders -Name 'x-amzn-RateLimit-Limit'
             $requestId = Get-HeaderValue -Headers $responseHeaders -Name 'x-amzn-RequestId'
@@ -138,6 +145,13 @@ function Invoke-SpApiRequest {
         catch {
             $detail = Get-ErrorDetail -ErrorRecord $_
             $status = if ($detail.StatusCode) { [int]$detail.StatusCode } else { 0 }
+            if ($status -eq 0) {
+                # log the raw exception for troubleshooting
+                Write-Log -Message "Invoke-SpApiRequest exception: $($_.Exception.GetType().FullName) - $($_.Exception.Message)" -LogPath $LogPath -Level 'WARN'
+            }
+            if ($status -eq 403) {
+                Write-Log -Message "HTTP 403 exception: $($_.Exception.GetType().FullName) - $($_.Exception.Message)" -LogPath $LogPath -Level 'WARN'
+            }
             if ($status -eq 429 -and $script:RunStats) { $script:RunStats.Http429Count++ }
 
             $errorCode = ''
@@ -149,7 +163,8 @@ function Invoke-SpApiRequest {
 
             $retryable = ($status -eq 429 -or $status -eq 500 -or $status -eq 503 -or $detail.Class -eq 'RateLimit/Server' -or $detail.Class -eq 'Auth')
             if (-not $retryable -or $attempt -ge $maxAttempts) {
-                Write-Log -Message "$Endpoint failed: status=$status class=$($detail.Class) code=$errorCode requestId=$requestId attempt=$attempt/$maxAttempts" -LogPath $LogPath -Level 'WARN'
+                $bodyMsg = if ($detail.BodyText) { " body='$($detail.BodyText)'" } else { '' }
+                Write-Log -Message "$Endpoint failed: status=$status class=$($detail.Class) code=$errorCode requestId=$requestId attempt=$attempt/$maxAttempts$bodyMsg" -LogPath $LogPath -Level 'WARN'
                 throw
             }
 
@@ -169,13 +184,14 @@ function Invoke-SpApiRequest {
                 Update-PricingThrottleFromLimit -RateLimitLimit $detail.RateLimitLimit -Config $Config -Had429
             }
 
-            Write-Log -Message "$Endpoint retry: status=$status class=$($detail.Class) code=$errorCode requestId=$requestId wait=$([Math]::Round($sleepSec,2))s limit=$($detail.RateLimitLimit) attempt=$attempt/$maxAttempts" -LogPath $LogPath -Level 'WARN'
+            $bodyMsg = if ($detail.BodyText) { " body='$($detail.BodyText)'" } else { '' }
+            Write-Log -Message "$Endpoint retry: status=$status class=$($detail.Class) code=$errorCode requestId=$requestId wait=$([Math]::Round($sleepSec,2))s limit=$($detail.RateLimitLimit) attempt=$attempt/$maxAttempts$bodyMsg" -LogPath $LogPath -Level 'WARN'
             Start-Sleep -Milliseconds ([int]([Math]::Ceiling($sleepSec * 1000)))
         }
     }
 }
 
-function Classify-StatusAndBody {
+function Get-StatusClassification {
     param(
         [Nullable[int]]$StatusCode,
         [string]$BodyText
@@ -214,51 +230,60 @@ function Get-ErrorDetail {
     $retryAfterSec = $null
     $rateLimitLimit = $null
 
-    if ($ErrorRecord -and $ErrorRecord.Exception -and $ErrorRecord.Exception.Response) {
+    if ($ErrorRecord -and $ErrorRecord.Exception) {
         try {
-            if ($ErrorRecord.Exception.Response.StatusCode) {
-                $statusCode = [int]$ErrorRecord.Exception.Response.StatusCode
+            $hasResponse = $ErrorRecord.Exception | Get-Member -Name 'Response' -MemberType 'Property' -ErrorAction SilentlyContinue
+            if ($hasResponse -and $ErrorRecord.Exception.Response) {
+                if ($ErrorRecord.Exception.Response.StatusCode) {
+                    $statusCode = [int]$ErrorRecord.Exception.Response.StatusCode
+                }
             }
         }
         catch {}
 
         try {
-            $headers = $ErrorRecord.Exception.Response.Headers
-            if ($headers) {
-                $retryAfterRaw = $headers['Retry-After']
-                if (-not $retryAfterRaw) { $retryAfterRaw = $headers['retry-after'] }
-                if ($retryAfterRaw) {
-                    $retryAfterInt = 0
-                    if ([int]::TryParse([string]$retryAfterRaw, [ref]$retryAfterInt)) {
-                        $retryAfterSec = [Math]::Max(1, $retryAfterInt)
-                    }
-                    else {
-                        $retryAfterDate = $null
-                        if ([DateTime]::TryParse([string]$retryAfterRaw, [ref]$retryAfterDate)) {
-                            $delta = [int][Math]::Ceiling(($retryAfterDate - (Get-Date)).TotalSeconds)
-                            if ($delta -gt 0) { $retryAfterSec = $delta }
+            $hasResponse = $ErrorRecord.Exception | Get-Member -Name 'Response' -MemberType 'Property' -ErrorAction SilentlyContinue
+            if ($hasResponse) {
+                $headers = $ErrorRecord.Exception.Response.Headers
+                if ($headers) {
+                    $retryAfterRaw = $headers['Retry-After']
+                    if (-not $retryAfterRaw) { $retryAfterRaw = $headers['retry-after'] }
+                    if ($retryAfterRaw) {
+                        $retryAfterInt = 0
+                        if ([int]::TryParse([string]$retryAfterRaw, [ref]$retryAfterInt)) {
+                            $retryAfterSec = [Math]::Max(1, $retryAfterInt)
+                        }
+                        else {
+                            $retryAfterDate = $null
+                            if ([DateTime]::TryParse([string]$retryAfterRaw, [ref]$retryAfterDate)) {
+                                $delta = [int][Math]::Ceiling(($retryAfterDate - (Get-Date)).TotalSeconds)
+                                if ($delta -gt 0) { $retryAfterSec = $delta }
+                            }
                         }
                     }
-                }
 
-                $rateLimitLimit = $headers['x-amzn-RateLimit-Limit']
-                if (-not $rateLimitLimit) { $rateLimitLimit = $headers['X-Amzn-RateLimit-Limit'] }
+                    $rateLimitLimit = $headers['x-amzn-RateLimit-Limit']
+                    if (-not $rateLimitLimit) { $rateLimitLimit = $headers['X-Amzn-RateLimit-Limit'] }
+                }
             }
         }
         catch {}
 
         try {
-            $stream = $ErrorRecord.Exception.Response.GetResponseStream()
-            if ($stream) {
-                $reader = New-Object System.IO.StreamReader($stream)
-                $bodyText = $reader.ReadToEnd()
-                $reader.Close()
+            $hasResponse = $ErrorRecord.Exception | Get-Member -Name 'Response' -MemberType 'Property' -ErrorAction SilentlyContinue
+            if ($hasResponse) {
+                $stream = $ErrorRecord.Exception.Response.GetResponseStream()
+                if ($stream) {
+                    $reader = New-Object System.IO.StreamReader($stream)
+                    $bodyText = $reader.ReadToEnd()
+                    $reader.Close()
+                }
             }
         }
         catch {}
     }
 
-    $classification = Classify-StatusAndBody -StatusCode $statusCode -BodyText $bodyText
+    $classification = Get-StatusClassification -StatusCode $statusCode -BodyText $bodyText
     return [PSCustomObject]@{
         StatusCode          = $statusCode
         BodyText            = $bodyText
@@ -751,7 +776,7 @@ function Get-PriceMapByAsinBatch {
 
             if ($statusCode -ge 400) {
                 $bodyText = if ($response.body) { ($response.body | ConvertTo-Json -Depth 8) } else { '' }
-                $detail = Classify-StatusAndBody -StatusCode $statusCode -BodyText $bodyText
+                $detail = Get-StatusClassification -StatusCode $statusCode -BodyText $bodyText
                 $errorClassMap[$asin] = $detail.Class
                 if ($statusCode -eq 429 -or $statusCode -eq 500 -or $statusCode -eq 503) {
                     $retryableResponseAsins.Add($asin) | Out-Null
@@ -792,7 +817,7 @@ function Get-PriceMapByAsinBatch {
     [PSCustomObject]@{ PriceMap = $priceMap; ErrorClassMap = $errorClassMap }
 }
 
-function Load-PersistentCache {
+function Import-PersistentCache {
     param([string]$Path, [string]$LogPath)
 
     if (-not (Test-Path $Path)) { return @{} }
@@ -839,7 +864,7 @@ function Save-PersistentCache {
     $rows | Sort-Object jan | ConvertTo-Json -Depth 5 | Set-Content -Path $Path -Encoding UTF8
 }
 
-function Append-DailyPriceHistory {
+function Add-DailyPriceHistory {
     param([hashtable]$RunCache, [string]$DirPath)
 
     if (-not (Test-Path $DirPath)) { New-Item -ItemType Directory -Path $DirPath -Force | Out-Null }
@@ -898,14 +923,14 @@ function Get-CacheTtlHoursByStatus {
     return 24
 }
 
-function Is-CacheFreshByStatus {
+function Test-CacheFreshByStatus {
     param([object]$Entry, [hashtable]$Config, [string]$CacheKind)
     if (-not $Entry) { return $false }
     $ttl = Get-CacheTtlHoursByStatus -Status $Entry.cache_status -Config $Config -CacheKind $CacheKind
-    return Is-CacheFresh -Entry $Entry -TtlHours $ttl
+    return Test-CacheFresh -Entry $Entry -TtlHours $ttl
 }
 
-function Is-CacheFresh {
+function Test-CacheFresh {
     param([object]$Entry, [int]$TtlHours)
 
     if (-not $Entry -or -not $Entry.fetched_at) { return $false }
@@ -998,7 +1023,7 @@ function Invoke-AmazonPriceUpdate {
         $lastRow = $sheet.Cells($sheet.Rows.Count, 2).End(-4162).Row
         $totalDataRows = [Math]::Max(0, $lastRow - 1)
 
-        $persistentCache = Load-PersistentCache -Path $cachePath -LogPath $logPath
+        $persistentCache = Import-PersistentCache -Path $cachePath -LogPath $logPath
         $runCache = @{}
         $processed = 0
         $errorCount = 0
@@ -1024,7 +1049,7 @@ function Invoke-AmazonPriceUpdate {
 
         foreach ($jan in $janList) {
             $janCacheKey = Get-JanCacheKey -MarketplaceId $Config.MarketplaceId -Jan $jan
-            if ($persistentCache.ContainsKey($janCacheKey) -and (Is-CacheFreshByStatus -Entry $persistentCache[$janCacheKey] -Config $Config -CacheKind 'jan')) {
+            if ($persistentCache.ContainsKey($janCacheKey) -and (Test-CacheFreshByStatus -Entry $persistentCache[$janCacheKey] -Config $Config -CacheKind 'jan')) {
                 $runCache[$jan] = $persistentCache[$janCacheKey]
                 $cacheHitCount++
             }
@@ -1053,7 +1078,7 @@ function Invoke-AmazonPriceUpdate {
                 if (-not $asin) { continue }
 
                 $offerKey = Get-OfferCacheKey -MarketplaceId $Config.MarketplaceId -Condition 'New' -Asin $asin
-                if ($persistentCache.ContainsKey($offerKey) -and (Is-CacheFreshByStatus -Entry $persistentCache[$offerKey] -Config $Config -CacheKind 'offer')) {
+                if ($persistentCache.ContainsKey($offerKey) -and (Test-CacheFreshByStatus -Entry $persistentCache[$offerKey] -Config $Config -CacheKind 'offer')) {
                     $cachedOffer = $persistentCache[$offerKey]
                     $priceMap[$asin] = $cachedOffer.price
                     if ($cachedOffer.cache_status -ne 'ok') {
@@ -1131,9 +1156,10 @@ function Invoke-AmazonPriceUpdate {
 
             if ($totalDataRows -gt 0) {
                 $percent = [int](($currentIndex * 100) / $totalDataRows)
-                $shouldReport = (($currentIndex % 10) -eq 0) -or ($currentIndex -eq 1) -or ($currentIndex -eq $totalDataRows)
+                # 50件ごとに進捗表示
+                $shouldReport = (($currentIndex % 50) -eq 0) -or ($currentIndex -eq 1) -or ($currentIndex -eq $totalDataRows)
                 if ($shouldReport) {
-                    Write-Progress -Activity 'Excel出力処理' -Status "$currentIndex / $totalDataRows 行を処理中" -PercentComplete $percent
+                    # avoid blue progress bar; just log text
                     Write-Host "進捗: $currentIndex / $totalDataRows"
                 }
             }
@@ -1184,7 +1210,7 @@ function Invoke-AmazonPriceUpdate {
         }
 
         Save-PersistentCache -CacheMap $persistentCache -Path $cachePath
-        $historySavedCount = Append-DailyPriceHistory -RunCache $runCache -DirPath $historyDir
+        $historySavedCount = Add-DailyPriceHistory -RunCache $runCache -DirPath $historyDir
         Write-Log -Message "価格履歴の追記件数: $historySavedCount" -LogPath $logPath
 
         try {
@@ -1218,4 +1244,4 @@ function Invoke-AmazonPriceUpdate {
     }
 }
 
-Export-ModuleMember -Function ConvertTo-PlainText,Write-Log,Classify-StatusAndBody,Get-ErrorDetail,Invoke-WithRetry,Get-AmzDateHeaderValue,New-SpApiHeaders,Split-IntoChunks,Read-AccessTokenCache,Save-AccessTokenCache,Get-LwaAccessTokenCached,Get-LwaAccessToken,Get-LowestNewPriceFromOffers,Get-PriceBySingleAsin,Get-AsinMapByJanBatch,Get-PriceMapByAsinBatch,Load-PersistentCache,Save-PersistentCache,Append-DailyPriceHistory,Is-CacheFresh,Save-SecretsInteractive,Invoke-AmazonPriceUpdate
+Export-ModuleMember -Function ConvertTo-PlainText,Write-Log,Get-StatusClassification,Get-ErrorDetail,Invoke-WithRetry,Get-AmzDateHeaderValue,New-SpApiHeaders,Split-IntoChunks,Read-AccessTokenCache,Save-AccessTokenCache,Get-LwaAccessTokenCached,Get-LwaAccessToken,Get-LowestNewPriceFromOffers,Get-PriceBySingleAsin,Get-AsinMapByJanBatch,Get-PriceMapByAsinBatch,Import-PersistentCache,Save-PersistentCache,Add-DailyPriceHistory,Test-CacheFresh,Save-SecretsInteractive,Invoke-AmazonPriceUpdate
