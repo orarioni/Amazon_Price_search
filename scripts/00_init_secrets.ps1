@@ -1,26 +1,27 @@
 $ErrorActionPreference = 'Stop'
 
-$repoRoot = Resolve-Path (Join-Path $PSScriptRoot '..')
-$secretsDir = Join-Path $repoRoot 'secrets'
-$secretFile = Join-Path $secretsDir 'lwa_secrets.xml'
+try {
+    $repoRoot = Resolve-Path (Join-Path $PSScriptRoot '..')
+    $configPath = Join-Path $repoRoot 'config.psd1'
+    $libPath = Join-Path $PSScriptRoot 'lib/AmazonPriceLib.psm1'
 
-if (-not (Test-Path $secretsDir)) {
-    New-Item -ItemType Directory -Path $secretsDir -Force | Out-Null
+    Import-Module $libPath -Force
+    $config = Import-PowerShellDataFile -Path $configPath
+    $secretFile = Join-Path $repoRoot $config.Paths.SecretsFile
+
+    Save-SecretsInteractive -SecretFile $secretFile
+    exit 0
 }
-
-Write-Host 'Amazon SP-API の認証情報を入力してください。'
-$clientId = Read-Host 'client_id'
-$clientSecret = Read-Host 'client_secret' -AsSecureString
-$refreshToken = Read-Host 'refresh_token' -AsSecureString
-
-$payload = [PSCustomObject]@{
-    client_id     = $clientId
-    client_secret = $clientSecret
-    refresh_token = $refreshToken
-    created_at    = (Get-Date).ToString('o')
+catch {
+    Write-Host ''
+    Write-Host '初期設定に失敗しました。' -ForegroundColor Red
+    Write-Host "エラー: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host ''
+    Write-Host '復旧手順:' -ForegroundColor Yellow
+    Write-Host '1) config.psd1 が存在し、破損していないか確認してください。'
+    Write-Host '2) client_id / client_secret / refresh_token を再入力して run_init.bat を再実行してください。'
+    Write-Host '3) 会社PCの権限で失敗する場合は、PowerShellを通常ユーザーで開き scripts\00_init_secrets.ps1 を実行して原因を確認してください。'
+    Write-Host ''
+    Write-Host '上記で解決しない場合は、表示されたエラー全文を添えて管理者に連絡してください。'
+    exit 1
 }
-
-$payload | Export-Clixml -Path $secretFile
-
-Write-Host "保存完了: $secretFile"
-Write-Host 'このファイルはDPAPIで暗号化され、同じWindowsユーザーのみ復号できます。'
