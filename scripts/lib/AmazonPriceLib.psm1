@@ -23,6 +23,158 @@ function Write-Log {
     Write-Host $line
 }
 
+
+function Initialize-RunStats {
+    $script:RunStats = [ordered]@{
+        TotalApiCalls      = 0
+        PricingBatchCalls  = 0
+        CatalogBatchCalls  = 0
+        RetryCount         = 0
+        Http429Count       = 0
+        TotalWaitSec       = 0.0
+        WaitEvents         = 0
+        NextPricingAllowedAt = Get-Date
+        PricingCooldownSec = 0.0
+    }
+}
+
+function Add-WaitMetric {
+    param([double]$Seconds)
+    if ($Seconds -le 0) { return }
+    $script:RunStats.TotalWaitSec += $Seconds
+    $script:RunStats.WaitEvents += 1
+}
+
+function Get-HeaderValue {
+    param([object]$Headers, [string]$Name)
+    if (-not $Headers) { return $null }
+    $v = $Headers[$Name]
+    if (-not $v) { $v = $Headers[$Name.ToLowerInvariant()] }
+    if (-not $v) { $v = $Headers[$Name.ToUpperInvariant()] }
+    if ($v -is [array]) { return [string]$v[0] }
+    return [string]$v
+}
+
+function Wait-ForPricingSlot {
+    param([hashtable]$Config)
+    if (-not $script:RunStats) { return }
+
+    $now = Get-Date
+    $baseInterval = if ($Config.PricingMinIntervalSec) { [double]$Config.PricingMinIntervalSec } else { 2.2 }
+    $target = if ($script:RunStats.NextPricingAllowedAt -gt $now) { $script:RunStats.NextPricingAllowedAt } else { $now }
+    $waitSec = ($target - $now).TotalSeconds
+    if ($waitSec -gt 0) {
+        Start-Sleep -Milliseconds ([int]([Math]::Ceiling($waitSec * 1000)))
+        Add-WaitMetric -Seconds $waitSec
+    }
+
+    $script:RunStats.NextPricingAllowedAt = (Get-Date).AddSeconds($baseInterval + [double]$script:RunStats.PricingCooldownSec)
+}
+
+function Update-PricingThrottleFromLimit {
+    param(
+        [string]$RateLimitLimit,
+        [hashtable]$Config,
+        [switch]$Had429
+    )
+
+    if (-not $script:RunStats) { return }
+
+    if ($Had429) {
+        $script:RunStats.PricingCooldownSec = [Math]::Min(15.0, [double]$script:RunStats.PricingCooldownSec + 1.0)
+    }
+    elseif ($script:RunStats.PricingCooldownSec -gt 0) {
+        $script:RunStats.PricingCooldownSec = [Math]::Max(0.0, [double]$script:RunStats.PricingCooldownSec - 0.2)
+    }
+
+    $baseInterval = if ($Config.PricingMinIntervalSec) { [double]$Config.PricingMinIntervalSec } else { 2.2 }
+    if ($RateLimitLimit) {
+        $limit = 0.0
+        if ([double]::TryParse($RateLimitLimit, [ref]$limit) -and $limit -gt 0) {
+            if ($limit -le 0.5) { $baseInterval = Get-Random -Minimum 2.2 -Maximum 2.5 }
+            elseif ($limit -le 1.0) { $baseInterval = Get-Random -Minimum 1.1 -Maximum 1.3 }
+            else { $baseInterval = [Math]::Max(0.4, (1.0 / $limit) * 1.2) }
+        }
+    }
+
+    $script:RunStats.NextPricingAllowedAt = (Get-Date).AddSeconds($baseInterval + [double]$script:RunStats.PricingCooldownSec)
+}
+
+function Invoke-SpApiRequest {
+    param(
+        [string]$Endpoint,
+        [string]$Method,
+        [string]$Uri,
+        [hashtable]$Headers,
+        [object]$Body,
+        [hashtable]$Config,
+        [string]$LogPath
+    )
+
+    $maxAttempts = if ($Config.RetryMaxAttempts) { [int]$Config.RetryMaxAttempts } else { 6 }
+    $maxWaitSec = if ($Config.RetryMaxWaitSec) { [int]$Config.RetryMaxWaitSec } else { 120 }
+
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+        $responseHeaders = $null
+        try {
+            if ($script:RunStats) { $script:RunStats.TotalApiCalls++ }
+            if ($Endpoint -match '^PricingBatch') { $script:RunStats.PricingBatchCalls++ }
+            if ($Endpoint -match '^CatalogBatch') { $script:RunStats.CatalogBatchCalls++ }
+
+            $params = @{ Method = $Method; Uri = $Uri; Headers = $Headers; ResponseHeadersVariable = 'responseHeaders' }
+            if ($null -ne $Body -and "$Body" -ne '') { $params.Body = $Body }
+            $res = Invoke-RestMethod @params
+
+            $limit = Get-HeaderValue -Headers $responseHeaders -Name 'x-amzn-RateLimit-Limit'
+            $requestId = Get-HeaderValue -Headers $responseHeaders -Name 'x-amzn-RequestId'
+            if ($limit) {
+                Write-Log -Message "$Endpoint success: limit=$limit, requestId=$requestId" -LogPath $LogPath
+            }
+            if ($Endpoint -match '^Pricing') {
+                Update-PricingThrottleFromLimit -RateLimitLimit $limit -Config $Config
+            }
+            return $res
+        }
+        catch {
+            $detail = Get-ErrorDetail -ErrorRecord $_
+            $status = if ($detail.StatusCode) { [int]$detail.StatusCode } else { 0 }
+            if ($status -eq 429 -and $script:RunStats) { $script:RunStats.Http429Count++ }
+
+            $errorCode = ''
+            $requestId = ''
+            if ($detail.BodyText) {
+                if ($detail.BodyText -match '"code"\s*:\s*"([^"]+)"') { $errorCode = $matches[1] }
+                if ($detail.BodyText -match '"requestId"\s*:\s*"([^"]+)"') { $requestId = $matches[1] }
+            }
+
+            $retryable = ($status -eq 429 -or $status -eq 500 -or $status -eq 503 -or $detail.Class -eq 'RateLimit/Server' -or $detail.Class -eq 'Auth')
+            if (-not $retryable -or $attempt -ge $maxAttempts) {
+                Write-Log -Message "$Endpoint failed: status=$status class=$($detail.Class) code=$errorCode requestId=$requestId attempt=$attempt/$maxAttempts" -LogPath $LogPath -Level 'WARN'
+                throw
+            }
+
+            $sleepSec = 0.0
+            if ($detail.RetryAfterSec -and $detail.RetryAfterSec -gt 0) {
+                $sleepSec = [double]$detail.RetryAfterSec
+            }
+            else {
+                $base = [Math]::Pow(2, $attempt)
+                $jitter = (Get-Random -Minimum 0 -Maximum 1000) / 1000.0
+                $sleepSec = [Math]::Min($maxWaitSec, $base + $jitter)
+            }
+
+            if ($script:RunStats) { $script:RunStats.RetryCount++ }
+            Add-WaitMetric -Seconds $sleepSec
+            if ($Endpoint -match '^Pricing' -and $status -eq 429) {
+                Update-PricingThrottleFromLimit -RateLimitLimit $detail.RateLimitLimit -Config $Config -Had429
+            }
+
+            Write-Log -Message "$Endpoint retry: status=$status class=$($detail.Class) code=$errorCode requestId=$requestId wait=$([Math]::Round($sleepSec,2))s limit=$($detail.RateLimitLimit) attempt=$attempt/$maxAttempts" -LogPath $LogPath -Level 'WARN'
+            Start-Sleep -Milliseconds ([int]([Math]::Ceiling($sleepSec * 1000)))
+        }
+    }
+}
+
 function Classify-StatusAndBody {
     param(
         [Nullable[int]]$StatusCode,
@@ -364,18 +516,14 @@ function Get-AsinMapByJanBatch {
         $res = $null
         $attemptDetail = $null
         try {
-            $res = Invoke-WithRetry -Label "Catalogバッチ取得(index=$index,size=$batchSize)" -MaxRetries $Config.MaxRetries -LogPath $LogPath -Action {
-                Invoke-RestMethod -Method Get -Uri $uri -Headers (New-SpApiHeaders -AccessToken $AccessToken -Config $Config)
-            }
+            $res = Invoke-SpApiRequest -Endpoint "CatalogBatch(index=$index,size=$batchSize)" -Method 'Get' -Uri $uri -Headers (New-SpApiHeaders -AccessToken $AccessToken -Config $Config) -Config $Config -LogPath $LogPath
         }
         catch {
             $attemptDetail = Get-ErrorDetail -ErrorRecord $_
             if ($attemptDetail.Class -eq 'Auth' -and $AuthContext) {
                 try {
                     $AccessToken = Get-LwaAccessTokenCached -ClientId $AuthContext.ClientId -ClientSecret $AuthContext.ClientSecret -RefreshToken $AuthContext.RefreshToken -Config $Config -LogPath $LogPath -TokenCachePath $AuthContext.TokenCachePath -ForceRefresh
-                    $res = Invoke-WithRetry -Label "Catalogバッチ再取得(認証更新,index=$index,size=$batchSize)" -MaxRetries $Config.MaxRetries -LogPath $LogPath -Action {
-                        Invoke-RestMethod -Method Get -Uri $uri -Headers (New-SpApiHeaders -AccessToken $AccessToken -Config $Config)
-                    }
+                    $res = Invoke-SpApiRequest -Endpoint "CatalogBatchAuthRetry(index=$index,size=$batchSize)" -Method 'Get' -Uri $uri -Headers (New-SpApiHeaders -AccessToken $AccessToken -Config $Config) -Config $Config -LogPath $LogPath
                 }
                 catch {
                     $attemptDetail = Get-ErrorDetail -ErrorRecord $_
@@ -443,17 +591,15 @@ function Get-PriceBySingleAsin {
 
     $res = $null
     try {
-        $res = Invoke-WithRetry -Label "Pricing単発取得(ASIN=$Asin)" -MaxRetries $Config.MaxRetries -LogPath $LogPath -Action {
-            Invoke-RestMethod -Method Get -Uri $uri -Headers (New-SpApiHeaders -AccessToken $AccessToken -Config $Config)
-        }
+        Wait-ForPricingSlot -Config $Config
+        $res = Invoke-SpApiRequest -Endpoint "PricingSingle(ASIN=$Asin)" -Method 'Get' -Uri $uri -Headers (New-SpApiHeaders -AccessToken $AccessToken -Config $Config) -Config $Config -LogPath $LogPath
     }
     catch {
         $detail = Get-ErrorDetail -ErrorRecord $_
         if ($detail.Class -eq 'Auth' -and $AuthContext) {
             $AccessToken = Get-LwaAccessTokenCached -ClientId $AuthContext.ClientId -ClientSecret $AuthContext.ClientSecret -RefreshToken $AuthContext.RefreshToken -Config $Config -LogPath $LogPath -TokenCachePath $AuthContext.TokenCachePath -ForceRefresh
-            $res = Invoke-WithRetry -Label "Pricing単発再取得(認証更新,ASIN=$Asin)" -MaxRetries $Config.MaxRetries -LogPath $LogPath -Action {
-                Invoke-RestMethod -Method Get -Uri $uri -Headers (New-SpApiHeaders -AccessToken $AccessToken -Config $Config)
-            }
+            Wait-ForPricingSlot -Config $Config
+            $res = Invoke-SpApiRequest -Endpoint "PricingSingleAuthRetry(ASIN=$Asin)" -Method 'Get' -Uri $uri -Headers (New-SpApiHeaders -AccessToken $AccessToken -Config $Config) -Config $Config -LogPath $LogPath
         }
         else {
             throw
@@ -531,18 +677,16 @@ function Get-PriceMapByAsinBatch {
         $res = $null
         $attemptDetail = $null
         try {
-            $res = Invoke-WithRetry -Label "Pricingバッチ取得(index=$index,size=$batchSize)" -MaxRetries $Config.MaxRetries -LogPath $LogPath -Action {
-                Invoke-RestMethod -Method Post -Uri "$($Config.SpApiBaseUrl)/batches/products/pricing/v0/itemOffers" -Headers (New-SpApiHeaders -AccessToken $AccessToken -Config $Config -ContentType 'application/json') -Body $body
-            }
+            Wait-ForPricingSlot -Config $Config
+            $res = Invoke-SpApiRequest -Endpoint "PricingBatch(index=$index,size=$batchSize)" -Method 'Post' -Uri "$($Config.SpApiBaseUrl)/batches/products/pricing/v0/itemOffers" -Headers (New-SpApiHeaders -AccessToken $AccessToken -Config $Config -ContentType 'application/json') -Body $body -Config $Config -LogPath $LogPath
         }
         catch {
             $attemptDetail = Get-ErrorDetail -ErrorRecord $_
             if ($attemptDetail.Class -eq 'Auth' -and $AuthContext) {
                 try {
                     $AccessToken = Get-LwaAccessTokenCached -ClientId $AuthContext.ClientId -ClientSecret $AuthContext.ClientSecret -RefreshToken $AuthContext.RefreshToken -Config $Config -LogPath $LogPath -TokenCachePath $AuthContext.TokenCachePath -ForceRefresh
-                    $res = Invoke-WithRetry -Label "Pricingバッチ再取得(認証更新,index=$index,size=$batchSize)" -MaxRetries $Config.MaxRetries -LogPath $LogPath -Action {
-                        Invoke-RestMethod -Method Post -Uri "$($Config.SpApiBaseUrl)/batches/products/pricing/v0/itemOffers" -Headers (New-SpApiHeaders -AccessToken $AccessToken -Config $Config -ContentType 'application/json') -Body $body
-                    }
+                    Wait-ForPricingSlot -Config $Config
+                    $res = Invoke-SpApiRequest -Endpoint "PricingBatchAuthRetry(index=$index,size=$batchSize)" -Method 'Post' -Uri "$($Config.SpApiBaseUrl)/batches/products/pricing/v0/itemOffers" -Headers (New-SpApiHeaders -AccessToken $AccessToken -Config $Config -ContentType 'application/json') -Body $body -Config $Config -LogPath $LogPath
                 }
                 catch {
                     $attemptDetail = Get-ErrorDetail -ErrorRecord $_
@@ -589,6 +733,7 @@ function Get-PriceMapByAsinBatch {
             continue
         }
 
+        $retryableResponseAsins = New-Object System.Collections.Generic.List[string]
         foreach ($response in $res.responses) {
             $statusCode = if ($response.status) { [int]$response.status } else { $null }
 
@@ -608,6 +753,9 @@ function Get-PriceMapByAsinBatch {
                 $bodyText = if ($response.body) { ($response.body | ConvertTo-Json -Depth 8) } else { '' }
                 $detail = Classify-StatusAndBody -StatusCode $statusCode -BodyText $bodyText
                 $errorClassMap[$asin] = $detail.Class
+                if ($statusCode -eq 429 -or $statusCode -eq 500 -or $statusCode -eq 503) {
+                    $retryableResponseAsins.Add($asin) | Out-Null
+                }
                 continue
             }
 
@@ -618,6 +766,23 @@ function Get-PriceMapByAsinBatch {
             }
             else {
                 $errorClassMap.Remove($asin) | Out-Null
+            }
+        }
+
+        if ($retryableResponseAsins.Count -gt 0) {
+            $retryAsins = @($retryableResponseAsins | Sort-Object -Unique)
+            Write-Log -Message "Pricing部分失敗ASINを単発再試行します: count=$($retryAsins.Count)" -LogPath $LogPath -Level 'WARN'
+            foreach ($asin in $retryAsins) {
+                try {
+                    $single = Get-PriceBySingleAsin -Asin $asin -AccessToken $AccessToken -Config $Config -LogPath $LogPath -AuthContext $AuthContext
+                    $priceMap[$asin] = $single.Price
+                    if ($single.ErrorClass) { $errorClassMap[$asin] = $single.ErrorClass }
+                    else { $errorClassMap.Remove($asin) | Out-Null }
+                }
+                catch {
+                    $detail = Get-ErrorDetail -ErrorRecord $_
+                    $errorClassMap[$asin] = if ($detail.Class) { $detail.Class } else { 'Other' }
+                }
             }
         }
 
@@ -705,6 +870,41 @@ function Append-DailyPriceHistory {
     return $rows.Count
 }
 
+
+function Get-JanCacheKey {
+    param([string]$MarketplaceId, [string]$Jan)
+    return "jan|$MarketplaceId|$Jan"
+}
+
+function Get-OfferCacheKey {
+    param([string]$MarketplaceId, [string]$Condition, [string]$Asin)
+    return "offer|$MarketplaceId|$Condition|$Asin"
+}
+
+function Get-CacheTtlHoursByStatus {
+    param([string]$Status, [hashtable]$Config, [string]$CacheKind)
+
+    if ($Status -eq 'not_found') {
+        if ($Config.NegativeCacheTtlHours) { return [int]$Config.NegativeCacheTtlHours }
+        return 12
+    }
+
+    if ($CacheKind -eq 'jan') {
+        if ($Config.JanAsinCacheTtlHours) { return [int]$Config.JanAsinCacheTtlHours }
+        return 168
+    }
+
+    if ($Config.OfferCacheTtlHours) { return [int]$Config.OfferCacheTtlHours }
+    return 24
+}
+
+function Is-CacheFreshByStatus {
+    param([object]$Entry, [hashtable]$Config, [string]$CacheKind)
+    if (-not $Entry) { return $false }
+    $ttl = Get-CacheTtlHoursByStatus -Status $Entry.cache_status -Config $Config -CacheKind $CacheKind
+    return Is-CacheFresh -Entry $Entry -TtlHours $ttl
+}
+
 function Is-CacheFresh {
     param([object]$Entry, [int]$TtlHours)
 
@@ -775,6 +975,7 @@ function Invoke-AmazonPriceUpdate {
     $refreshToken = ConvertTo-PlainText -Secure $secret.refresh_token
 
     Write-Log -Message '更新処理を開始します。' -LogPath $logPath
+    Initialize-RunStats
     $authContext = @{
         ClientId = $clientId
         ClientSecret = $clientSecret
@@ -795,6 +996,7 @@ function Invoke-AmazonPriceUpdate {
         $workbook = $excel.Workbooks.Open($inputPath)
         $sheet = $workbook.Worksheets.Item(1)
         $lastRow = $sheet.Cells($sheet.Rows.Count, 2).End(-4162).Row
+        $totalDataRows = [Math]::Max(0, $lastRow - 1)
 
         $persistentCache = Load-PersistentCache -Path $cachePath -LogPath $logPath
         $runCache = @{}
@@ -821,8 +1023,9 @@ function Invoke-AmazonPriceUpdate {
         $needApiJans = @()
 
         foreach ($jan in $janList) {
-            if ($persistentCache.ContainsKey($jan) -and (Is-CacheFresh -Entry $persistentCache[$jan] -TtlHours $Config.CacheTtlHours)) {
-                $runCache[$jan] = $persistentCache[$jan]
+            $janCacheKey = Get-JanCacheKey -MarketplaceId $Config.MarketplaceId -Jan $jan
+            if ($persistentCache.ContainsKey($janCacheKey) -and (Is-CacheFreshByStatus -Entry $persistentCache[$janCacheKey] -Config $Config -CacheKind 'jan')) {
+                $runCache[$jan] = $persistentCache[$janCacheKey]
                 $cacheHitCount++
             }
             else {
@@ -831,32 +1034,44 @@ function Invoke-AmazonPriceUpdate {
             }
         }
 
+        $uniqueAsinCount = 0
         if ($needApiJans.Count -gt 0) {
             $catalogResult = Get-AsinMapByJanBatch -Jans $needApiJans -AccessToken $accessToken -Config $Config -LogPath $logPath -AuthContext $authContext
             $asinMap = $catalogResult.AsinMap
             $catalogErrorMap = $catalogResult.ErrorClassMap
-            $catalogApiCalls = (Split-IntoChunks -Items $needApiJans -ChunkSize $Config.CatalogBatchSize).Count
+            $catalogApiCalls = $script:RunStats.CatalogBatchCalls
+
+            $allAsins = @($asinMap.Values | Where-Object { $_ } | Sort-Object -Unique)
+            $uniqueAsinCount = $allAsins.Count
 
             $needPriceAsins = @()
-            foreach ($jan in $needApiJans) {
-                $asin = $asinMap[$jan]
-                if ($asin) { $needPriceAsins += $asin }
-            }
-
             $priceMap = @{}
             $priceErrorMap = @{}
+
+            foreach ($jan in $needApiJans) {
+                $asin = $asinMap[$jan]
+                if (-not $asin) { continue }
+
+                $offerKey = Get-OfferCacheKey -MarketplaceId $Config.MarketplaceId -Condition 'New' -Asin $asin
+                if ($persistentCache.ContainsKey($offerKey) -and (Is-CacheFreshByStatus -Entry $persistentCache[$offerKey] -Config $Config -CacheKind 'offer')) {
+                    $cachedOffer = $persistentCache[$offerKey]
+                    $priceMap[$asin] = $cachedOffer.price
+                    if ($cachedOffer.cache_status -ne 'ok') {
+                        $priceErrorMap[$asin] = if ($cachedOffer.cache_status -eq 'not_found') { 'NotFound/Validation' } else { 'Other' }
+                    }
+                    $cacheHitCount++
+                }
+                else {
+                    $needPriceAsins += $asin
+                }
+            }
+
             if ($needPriceAsins.Count -gt 0) {
                 $distinctAsins = @($needPriceAsins | Sort-Object -Unique)
                 $pricingResult = Get-PriceMapByAsinBatch -Asins $distinctAsins -AccessToken $accessToken -Config $Config -LogPath $logPath -AuthContext $authContext
-                $priceMap = $pricingResult.PriceMap
-                $priceErrorMap = $pricingResult.ErrorClassMap
-                $singleThreshold = if ($Config.PricingSingleFallbackThreshold) { [int]$Config.PricingSingleFallbackThreshold } else { 3 }
-                if ($distinctAsins.Count -le $singleThreshold) {
-                    $pricingApiCalls = $distinctAsins.Count
-                }
-                else {
-                    $pricingApiCalls = (Split-IntoChunks -Items $distinctAsins -ChunkSize $Config.PricingBatchSize).Count
-                }
+                foreach ($k in $pricingResult.PriceMap.Keys) { $priceMap[$k] = $pricingResult.PriceMap[$k] }
+                foreach ($k in $pricingResult.ErrorClassMap.Keys) { $priceErrorMap[$k] = $pricingResult.ErrorClassMap[$k] }
+                $pricingApiCalls = $script:RunStats.PricingBatchCalls
             }
 
             $fetchedAt = (Get-Date).ToString('o')
@@ -897,13 +1112,31 @@ function Invoke-AmazonPriceUpdate {
 
                 $entry = [PSCustomObject]@{ asin = $asin; price = $price; fetched_at = $fetchedAt; cache_status = $cacheStatus }
                 $runCache[$jan] = $entry
-                if ($cacheStatus -eq 'not_found' -or $cacheStatus -eq 'ok') { $persistentCache[$jan] = $entry }
-                elseif ($persistentCache.ContainsKey($jan)) { $persistentCache.Remove($jan) }
+
+                $janCacheKey = Get-JanCacheKey -MarketplaceId $Config.MarketplaceId -Jan $jan
+                if ($cacheStatus -eq 'not_found' -or $cacheStatus -eq 'ok') { $persistentCache[$janCacheKey] = $entry }
+                elseif ($persistentCache.ContainsKey($janCacheKey)) { $persistentCache.Remove($janCacheKey) }
+
+                if ($asin) {
+                    $offerKey = Get-OfferCacheKey -MarketplaceId $Config.MarketplaceId -Condition 'New' -Asin $asin
+                    if ($cacheStatus -eq 'not_found' -or $cacheStatus -eq 'ok') { $persistentCache[$offerKey] = $entry }
+                    elseif ($persistentCache.ContainsKey($offerKey)) { $persistentCache.Remove($offerKey) }
+                }
             }
         }
 
         for ($row = 2; $row -le $lastRow; $row++) {
             $jan = $janByRow[$row]
+            $currentIndex = $row - 1
+
+            if ($totalDataRows -gt 0) {
+                $percent = [int](($currentIndex * 100) / $totalDataRows)
+                $shouldReport = (($currentIndex % 10) -eq 0) -or ($currentIndex -eq 1) -or ($currentIndex -eq $totalDataRows)
+                if ($shouldReport) {
+                    Write-Progress -Activity 'Excel出力処理' -Status "$currentIndex / $totalDataRows 行を処理中" -PercentComplete $percent
+                    Write-Host "進捗: $currentIndex / $totalDataRows"
+                }
+            }
 
             if ([string]::IsNullOrWhiteSpace($jan)) {
                 $sheet.Cells.Item($row, 7).Value2 = ''
@@ -962,11 +1195,19 @@ function Invoke-AmazonPriceUpdate {
             throw
         }
 
-        Write-Log -Message "呼び出し統計: JAN総数=$($janList.Count), cache_hit=$cacheHitCount, cache_miss=$cacheMissCount, catalog_calls=$catalogApiCalls, pricing_calls=$pricingApiCalls" -LogPath $logPath
+        $avgWait = if ($script:RunStats.WaitEvents -gt 0) { [Math]::Round($script:RunStats.TotalWaitSec / $script:RunStats.WaitEvents, 2) } else { 0 }
+        $apiReducedBase = [Math]::Max(1, $uniqueAsinCount)
+        $pricingReductionPct = [Math]::Round((1 - ([double]$pricingApiCalls / [double]$apiReducedBase)) * 100, 2)
+        Write-Log -Message "呼び出し統計: input_rows=$totalDataRows, unique_jan=$($janList.Count), unique_asin=$uniqueAsinCount, cache_hit=$cacheHitCount, cache_miss=$cacheMissCount, catalog_calls=$catalogApiCalls, pricing_calls=$pricingApiCalls, pricing_reduction_pct=$pricingReductionPct" -LogPath $logPath
+        Write-Log -Message "再試行統計: api_total_calls=$($script:RunStats.TotalApiCalls), retry_count=$($script:RunStats.RetryCount), http429_count=$($script:RunStats.Http429Count), total_wait_sec=$([Math]::Round($script:RunStats.TotalWaitSec,2)), avg_wait_sec=$avgWait" -LogPath $logPath
+        $metricsPath = Join-Path $logDir 'metrics.jsonl'
+        $metricsRecord = [PSCustomObject]@{ ts=(Get-Date).ToString('o'); input_rows=$totalDataRows; unique_jan=$($janList.Count); unique_asin=$uniqueAsinCount; pricing_calls=$pricingApiCalls; pricing_reduction_pct=$pricingReductionPct; api_total_calls=$($script:RunStats.TotalApiCalls); retry_count=$($script:RunStats.RetryCount); http429_count=$($script:RunStats.Http429Count); total_wait_sec=[Math]::Round($script:RunStats.TotalWaitSec,2); avg_wait_sec=$avgWait }
+        Add-Content -Path $metricsPath -Value ($metricsRecord | ConvertTo-Json -Compress -Depth 5) -Encoding UTF8
         Write-Log -Message "エラー分類統計: NotFound/Validation=$notFoundValidationCount, RateLimit/Server=$rateLimitServerCount, Other=$otherErrorCount" -LogPath $logPath
         Write-Log -Message "更新完了: 処理件数=$processed, エラー件数=$errorCount, 出力=$outputPath" -LogPath $logPath
     }
     finally {
+        Write-Progress -Activity 'Excel出力処理' -Completed
         if ($workbook) { $workbook.Close($false) }
         if ($excel) { $excel.Quit() }
         if ($sheet) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($sheet) }

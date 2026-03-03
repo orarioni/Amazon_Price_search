@@ -54,6 +54,7 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 2. Excel を閉じる
 3. `run_update.bat` を実行
 4. `data/output.xlsx` を確認
+   - 実行中はコンソールに `進捗: 現在件数 / 入力件数` を表示します（約10行ごと）。
 
 `run_update.bat` は内部で `scripts/10_update_excel.ps1` を実行します。
 
@@ -113,7 +114,9 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 
 - ファイル: `cache/price_cache.json`
 - アクセストークンキャッシュ: `cache/access_token.json`（有効期限内は再利用）
-- TTL: 24時間（`config.psd1` の `CacheTtlHours`）
+- JAN→ASIN キャッシュTTL: 7日（`JanAsinCacheTtlHours`）
+- ASIN→Offers キャッシュTTL: 24時間（`OfferCacheTtlHours`）
+- negative cache TTL: 12時間（`NegativeCacheTtlHours`）
 - `ok` / `not_found` はキャッシュ保持
 - `transient_error` は永続化しない（次回再取得）
 
@@ -128,8 +131,10 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 ## ログ
 
 - 実行ログ: `logs/run.log`
+- 実行メトリクス(JSONL): `logs/metrics.jsonl`
 - API失敗時の分類（NotFound/Validation, RateLimit/Server, Other）や件数統計を出力
 - レート制限関連では `x-amzn-RateLimit-Limit` / `Retry-After` をログに残し、運用時の上限把握に利用
+- 終了時に `input_rows / unique_asin / pricing_calls / pricing_reduction_pct / http429_count / avg_wait_sec` を出力
 
 トラブル時はまず `logs/run.log` を確認してください。
 
@@ -204,6 +209,7 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 ## 運用メモ
 
 - API呼び出し回数を抑えるため、同一JANは自動で集約処理されます。
+- Pricing呼び出しは基本直列で、最小間隔を保ちながら動的スロットリングします。
 - 429/503 が増える場合は、バッチサイズを自動で 20→10→5 と段階縮小して成功率を優先します。
 - 件数が多い場合は実行時間が伸びるため、更新バッチを分けると切り分けしやすくなります。
 - 定期運用前に、少件数データで `output.xlsx` と `logs/run.log` の内容を一度確認することを推奨します。
