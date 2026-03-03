@@ -258,6 +258,10 @@ function Get-ErrorDetail {
         catch {}
     }
 
+    if ([string]::IsNullOrWhiteSpace($bodyText) -and $ErrorRecord -and $ErrorRecord.Exception -and $ErrorRecord.Exception.Message) {
+        $bodyText = [string]$ErrorRecord.Exception.Message
+    }
+
     $classification = Classify-StatusAndBody -StatusCode $statusCode -BodyText $bodyText
     return [PSCustomObject]@{
         StatusCode          = $statusCode
