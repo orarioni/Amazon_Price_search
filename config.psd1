@@ -5,6 +5,7 @@
     MaxRetries        = 4
     CatalogBatchSize  = 20
     PricingBatchSize  = 20
+    PricingSingleFallbackThreshold = 3
     CacheTtlHours     = 24
 
     Paths = @{
@@ -17,5 +18,6 @@
         CacheDir    = 'cache'
         CacheFile   = 'cache/price_cache.json'
         HistoryDir  = 'cache/history'
+        AccessTokenCacheFile = 'cache/access_token.json'
     }
 }

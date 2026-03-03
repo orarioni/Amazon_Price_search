@@ -15,7 +15,7 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 - 同一JANの重複をまとめて処理し、APIコール数を削減
 - 永続キャッシュ（`cache/price_cache.json`）で24時間以内の再取得を抑制
 - 価格履歴を日次追記（`cache/history/prices_YYYY-MM-DD.jsonl`）
-- レート制限・一時障害時のリトライ（指数バックオフ）
+- レート制限・一時障害時のリトライ（Retry-After優先 + 指数バックオフ + ジッター）
 
 ---
 
@@ -81,6 +81,30 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 - 該当商品なし（NotFound/Validation）は G/H/I を空欄化
 - 一時エラー（RateLimit/Server など）は当該行のみ空欄で継続（全体停止しない）
 
+
+### 「最安」の定義（運用ルール）
+
+- 対象コンディション: **New**（`ItemCondition=New`）
+- 価格計算: `LandedPrice` を優先。無い場合は `ListingPrice + Shipping`
+- Prime可否・出荷元/販売元・ポイント還元は現状の最安判定には含めない
+- 上記ルールを変える場合は、社内運用ルールとして事前に合意してから設定/実装を変更してください
+
+---
+
+
+## SP-API ヘッダ運用（公式推奨に寄せた方針）
+
+本ツールの SP-API 呼び出しは、次のヘッダを毎回付与します。
+
+- `x-amz-access-token`（LWAアクセストークン）
+- `x-amz-date`（UTC時刻、`yyyyMMddTHHmmssZ`）
+- `User-Agent`（必須）
+
+補足:
+
+- `Authorization: Bearer ...` は付与していません（必須要件ではないため）。
+- 将来、PII を扱う restricted operations に拡張する場合は、LWAアクセストークンではなく **RDT（Restricted Data Token）** の利用が必要です。
+
 ---
 
 ## キャッシュと履歴
@@ -88,6 +112,7 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 ### 永続キャッシュ
 
 - ファイル: `cache/price_cache.json`
+- アクセストークンキャッシュ: `cache/access_token.json`（有効期限内は再利用）
 - TTL: 24時間（`config.psd1` の `CacheTtlHours`）
 - `ok` / `not_found` はキャッシュ保持
 - `transient_error` は永続化しない（次回再取得）
@@ -104,6 +129,7 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 
 - 実行ログ: `logs/run.log`
 - API失敗時の分類（NotFound/Validation, RateLimit/Server, Other）や件数統計を出力
+- レート制限関連では `x-amzn-RateLimit-Limit` / `Retry-After` をログに残し、運用時の上限把握に利用
 
 トラブル時はまず `logs/run.log` を確認してください。
 
@@ -169,7 +195,7 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 - `scripts/10_update_excel.ps1` : 薄い実行スクリプト（設定読込→実行）
 - `scripts/lib/AmazonPriceLib.psm1` : 共通ライブラリ（認証、SP-API、リトライ、キャッシュ、Excel出力）
 - `data/` : 入出力Excel配置場所（`input.xlsx` / `output.xlsx`）
-- `cache/` : 永続キャッシュ・履歴
+- `cache/` : 永続キャッシュ・履歴・アクセストークンキャッシュ
 - `logs/` : 実行ログ
 - `secrets/` : 認証情報（実行時生成）
 
@@ -178,5 +204,6 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 ## 運用メモ
 
 - API呼び出し回数を抑えるため、同一JANは自動で集約処理されます。
+- 429/503 が増える場合は、バッチサイズを自動で 20→10→5 と段階縮小して成功率を優先します。
 - 件数が多い場合は実行時間が伸びるため、更新バッチを分けると切り分けしやすくなります。
 - 定期運用前に、少件数データで `output.xlsx` と `logs/run.log` の内容を一度確認することを推奨します。

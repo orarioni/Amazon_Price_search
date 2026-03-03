@@ -35,6 +35,10 @@ function Classify-StatusAndBody {
         return [PSCustomObject]@{ Class = 'RateLimit/Server'; IsTransient = $true; IsPermanentNotFound = $false }
     }
 
+    if ($StatusCode -eq 401 -or $StatusCode -eq 403) {
+        return [PSCustomObject]@{ Class = 'Auth'; IsTransient = $false; IsPermanentNotFound = $false }
+    }
+
     if ($StatusCode -eq 404 -or $StatusCode -eq 400 -or $StatusCode -eq 422) {
         return [PSCustomObject]@{ Class = 'NotFound/Validation'; IsTransient = $false; IsPermanentNotFound = $true }
     }
@@ -55,11 +59,38 @@ function Get-ErrorDetail {
 
     $statusCode = $null
     $bodyText = $null
+    $retryAfterSec = $null
+    $rateLimitLimit = $null
 
     if ($ErrorRecord -and $ErrorRecord.Exception -and $ErrorRecord.Exception.Response) {
         try {
             if ($ErrorRecord.Exception.Response.StatusCode) {
                 $statusCode = [int]$ErrorRecord.Exception.Response.StatusCode
+            }
+        }
+        catch {}
+
+        try {
+            $headers = $ErrorRecord.Exception.Response.Headers
+            if ($headers) {
+                $retryAfterRaw = $headers['Retry-After']
+                if (-not $retryAfterRaw) { $retryAfterRaw = $headers['retry-after'] }
+                if ($retryAfterRaw) {
+                    $retryAfterInt = 0
+                    if ([int]::TryParse([string]$retryAfterRaw, [ref]$retryAfterInt)) {
+                        $retryAfterSec = [Math]::Max(1, $retryAfterInt)
+                    }
+                    else {
+                        $retryAfterDate = $null
+                        if ([DateTime]::TryParse([string]$retryAfterRaw, [ref]$retryAfterDate)) {
+                            $delta = [int][Math]::Ceiling(($retryAfterDate - (Get-Date)).TotalSeconds)
+                            if ($delta -gt 0) { $retryAfterSec = $delta }
+                        }
+                    }
+                }
+
+                $rateLimitLimit = $headers['x-amzn-RateLimit-Limit']
+                if (-not $rateLimitLimit) { $rateLimitLimit = $headers['X-Amzn-RateLimit-Limit'] }
             }
         }
         catch {}
@@ -79,6 +110,8 @@ function Get-ErrorDetail {
     return [PSCustomObject]@{
         StatusCode          = $statusCode
         BodyText            = $bodyText
+        RetryAfterSec       = $retryAfterSec
+        RateLimitLimit      = $rateLimitLimit
         Class               = $classification.Class
         IsTransient         = $classification.IsTransient
         IsPermanentNotFound = $classification.IsPermanentNotFound
@@ -101,17 +134,55 @@ function Invoke-WithRetry {
         }
         catch {
             $detail = Get-ErrorDetail -ErrorRecord $_
+            $rateLimitInfo = if ($detail.RateLimitLimit) { ", limit=$($detail.RateLimitLimit)" } else { '' }
+
             if ($detail.IsTransient -and $attempt -lt $MaxRetries) {
-                $sleepSec = [Math]::Pow(2, $attempt)
-                Write-Log -Message "$Label 失敗 (分類=$($detail.Class), HTTP $($detail.StatusCode))。$sleepSec 秒後にリトライします (試行 $attempt/$MaxRetries)。" -LogPath $LogPath -Level 'WARN'
-                Start-Sleep -Seconds $sleepSec
+                if ($detail.RetryAfterSec -and $detail.RetryAfterSec -gt 0) {
+                    $sleepSec = [int]$detail.RetryAfterSec
+                    Write-Log -Message "$Label 失敗 (分類=$($detail.Class), HTTP $($detail.StatusCode)$rateLimitInfo)。Retry-After=$sleepSec 秒を優先してリトライします (試行 $attempt/$MaxRetries)。" -LogPath $LogPath -Level 'WARN'
+                }
+                else {
+                    $baseSec = [Math]::Pow(2, $attempt)
+                    $jitterMs = Get-Random -Minimum 0 -Maximum 1000
+                    $sleepSec = [double]$baseSec + ([double]$jitterMs / 1000.0)
+                    $sleepSecText = [Math]::Round($sleepSec, 2)
+                    Write-Log -Message "$Label 失敗 (分類=$($detail.Class), HTTP $($detail.StatusCode)$rateLimitInfo)。指数バックオフ+$jitterMs ms ジッターで $sleepSecText 秒後にリトライします (試行 $attempt/$MaxRetries)。" -LogPath $LogPath -Level 'WARN'
+                }
+
+                Start-Sleep -Milliseconds ([int]([Math]::Ceiling($sleepSec * 1000)))
                 continue
             }
 
-            Write-Log -Message "$Label 失敗 (分類=$($detail.Class), HTTP $($detail.StatusCode))。再試行を終了します。" -LogPath $LogPath -Level 'WARN'
+            Write-Log -Message "$Label 失敗 (分類=$($detail.Class), HTTP $($detail.StatusCode)$rateLimitInfo)。再試行を終了します。" -LogPath $LogPath -Level 'WARN'
             throw
         }
     }
+}
+
+
+function Get-AmzDateHeaderValue {
+    return (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
+}
+
+function New-SpApiHeaders {
+    param(
+        [string]$AccessToken,
+        [hashtable]$Config,
+        [string]$ContentType
+    )
+
+    $headers = @{
+        'x-amz-access-token' = $AccessToken
+        'x-amz-date'         = Get-AmzDateHeaderValue
+        'User-Agent'         = $Config.UserAgent
+        'Accept'             = 'application/json'
+    }
+
+    if ($ContentType) {
+        $headers['Content-Type'] = $ContentType
+    }
+
+    return $headers
 }
 
 function Split-IntoChunks {
@@ -134,14 +205,67 @@ function Split-IntoChunks {
     return $chunks
 }
 
-function Get-LwaAccessToken {
+
+function Read-AccessTokenCache {
+    param([string]$Path)
+
+    if (-not (Test-Path $Path)) { return $null }
+
+    try {
+        $raw = Get-Content -Path $Path -Raw -Encoding UTF8
+        if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
+        $parsed = ConvertFrom-Json -InputObject $raw
+        if (-not $parsed -or -not $parsed.token -or -not $parsed.expires_at) { return $null }
+
+        $expiresAt = $null
+        if (-not [DateTime]::TryParse($parsed.expires_at, [ref]$expiresAt)) { return $null }
+
+        [PSCustomObject]@{ token = [string]$parsed.token; expires_at = $expiresAt }
+    }
+    catch {
+        return $null
+    }
+}
+
+function Save-AccessTokenCache {
+    param(
+        [string]$Path,
+        [string]$Token,
+        [int]$ExpiresInSeconds
+    )
+
+    $parentDir = Split-Path -Path $Path -Parent
+    if ($parentDir -and -not (Test-Path $parentDir)) {
+        New-Item -ItemType Directory -Path $parentDir -Force | Out-Null
+    }
+
+    $safeExpires = if ($ExpiresInSeconds -and $ExpiresInSeconds -gt 90) { $ExpiresInSeconds - 60 } else { 3300 }
+    $expiresAt = (Get-Date).AddSeconds($safeExpires).ToString('o')
+
+    [PSCustomObject]@{
+        token      = $Token
+        expires_at = $expiresAt
+    } | ConvertTo-Json -Depth 3 | Set-Content -Path $Path -Encoding UTF8
+}
+
+function Get-LwaAccessTokenCached {
     param(
         [string]$ClientId,
         [string]$ClientSecret,
         [string]$RefreshToken,
         [hashtable]$Config,
-        [string]$LogPath
+        [string]$LogPath,
+        [string]$TokenCachePath,
+        [switch]$ForceRefresh
     )
+
+    if (-not $ForceRefresh) {
+        $cached = Read-AccessTokenCache -Path $TokenCachePath
+        if ($cached -and $cached.expires_at -gt (Get-Date).AddSeconds(30)) {
+            Write-Log -Message 'LWAアクセストークンをキャッシュから再利用します。' -LogPath $LogPath
+            return $cached.token
+        }
+    }
 
     $body = @{
         grant_type    = 'refresh_token'
@@ -159,7 +283,25 @@ function Get-LwaAccessToken {
     if (-not $res.access_token) {
         throw 'LWAアクセストークンの取得に失敗しました。'
     }
-    return $res.access_token
+
+    $expiresIn = 3600
+    if ($res.expires_in) { $expiresIn = [int]$res.expires_in }
+    Save-AccessTokenCache -Path $TokenCachePath -Token ([string]$res.access_token) -ExpiresInSeconds $expiresIn
+    Write-Log -Message 'LWAアクセストークンを新規取得してキャッシュへ保存しました。' -LogPath $LogPath
+    return [string]$res.access_token
+}
+
+function Get-LwaAccessToken {
+    param(
+        [string]$ClientId,
+        [string]$ClientSecret,
+        [string]$RefreshToken,
+        [hashtable]$Config,
+        [string]$LogPath,
+        [string]$TokenCachePath
+    )
+
+    return Get-LwaAccessTokenCached -ClientId $ClientId -ClientSecret $ClientSecret -RefreshToken $RefreshToken -Config $Config -LogPath $LogPath -TokenCachePath $TokenCachePath
 }
 
 function Get-LowestNewPriceFromOffers {
@@ -201,33 +343,58 @@ function Get-AsinMapByJanBatch {
         [array]$Jans,
         [string]$AccessToken,
         [hashtable]$Config,
-        [string]$LogPath
+        [string]$LogPath,
+        [hashtable]$AuthContext
     )
 
     $resultMap = @{}
     $errorClassMap = @{}
-    $chunks = Split-IntoChunks -Items $Jans -ChunkSize $Config.CatalogBatchSize
+    $minBatchSize = 5
+    $batchSize = [Math]::Max($minBatchSize, [int]$Config.CatalogBatchSize)
+    $index = 0
 
-    for ($i = 0; $i -lt $chunks.Count; $i++) {
-        $chunk = $chunks[$i]
+    while ($index -lt $Jans.Count) {
+        $end = [Math]::Min($index + $batchSize - 1, $Jans.Count - 1)
+        $chunk = @($Jans[$index..$end])
         foreach ($jan in $chunk) { $resultMap[$jan] = $null }
 
         $identifiers = ($chunk | ForEach-Object { $_.Trim() }) -join ','
         $uri = "$($Config.SpApiBaseUrl)/catalog/2022-04-01/items?identifiers=$([Uri]::EscapeDataString($identifiers))&identifiersType=EAN&marketplaceIds=$($Config.MarketplaceId)"
 
+        $res = $null
+        $attemptDetail = $null
         try {
-            $res = Invoke-WithRetry -Label "Catalogバッチ取得 ($($i + 1)/$($chunks.Count))" -MaxRetries $Config.MaxRetries -LogPath $LogPath -Action {
-                Invoke-RestMethod -Method Get -Uri $uri -Headers @{
-                    'Authorization'      = "Bearer $AccessToken"
-                    'x-amz-access-token' = $AccessToken
-                    'User-Agent'         = $Config.UserAgent
-                    'Accept'             = 'application/json'
-                }
+            $res = Invoke-WithRetry -Label "Catalogバッチ取得(index=$index,size=$batchSize)" -MaxRetries $Config.MaxRetries -LogPath $LogPath -Action {
+                Invoke-RestMethod -Method Get -Uri $uri -Headers (New-SpApiHeaders -AccessToken $AccessToken -Config $Config)
             }
         }
         catch {
-            $detail = Get-ErrorDetail -ErrorRecord $_
-            foreach ($jan in $chunk) { $errorClassMap[$jan] = $detail.Class }
+            $attemptDetail = Get-ErrorDetail -ErrorRecord $_
+            if ($attemptDetail.Class -eq 'Auth' -and $AuthContext) {
+                try {
+                    $AccessToken = Get-LwaAccessTokenCached -ClientId $AuthContext.ClientId -ClientSecret $AuthContext.ClientSecret -RefreshToken $AuthContext.RefreshToken -Config $Config -LogPath $LogPath -TokenCachePath $AuthContext.TokenCachePath -ForceRefresh
+                    $res = Invoke-WithRetry -Label "Catalogバッチ再取得(認証更新,index=$index,size=$batchSize)" -MaxRetries $Config.MaxRetries -LogPath $LogPath -Action {
+                        Invoke-RestMethod -Method Get -Uri $uri -Headers (New-SpApiHeaders -AccessToken $AccessToken -Config $Config)
+                    }
+                }
+                catch {
+                    $attemptDetail = Get-ErrorDetail -ErrorRecord $_
+                }
+            }
+        }
+
+        if (-not $res) {
+            if ($attemptDetail -and $attemptDetail.Class -eq 'RateLimit/Server' -and $batchSize -gt $minBatchSize) {
+                $nextBatchSize = [Math]::Max($minBatchSize, [int][Math]::Floor($batchSize / 2))
+                Write-Log -Message "Catalogバッチを縮小します: $batchSize -> $nextBatchSize (index=$index, HTTP=$($attemptDetail.StatusCode), limit=$($attemptDetail.RateLimitLimit))" -LogPath $LogPath -Level 'WARN'
+                $batchSize = $nextBatchSize
+                continue
+            }
+
+            foreach ($jan in $chunk) {
+                $errorClassMap[$jan] = if ($attemptDetail) { $attemptDetail.Class } else { 'Other' }
+            }
+            $index = $end + 1
             continue
         }
 
@@ -255,9 +422,62 @@ function Get-AsinMapByJanBatch {
                 $errorClassMap[$jan] = 'NotFound/Validation'
             }
         }
+
+        $index = $end + 1
     }
 
     [PSCustomObject]@{ AsinMap = $resultMap; ErrorClassMap = $errorClassMap }
+}
+
+
+function Get-PriceBySingleAsin {
+    param(
+        [string]$Asin,
+        [string]$AccessToken,
+        [hashtable]$Config,
+        [string]$LogPath,
+        [hashtable]$AuthContext
+    )
+
+    $uri = "$($Config.SpApiBaseUrl)/products/pricing/v0/items/$([Uri]::EscapeDataString($Asin))/offers?MarketplaceId=$($Config.MarketplaceId)&ItemCondition=New"
+
+    $res = $null
+    try {
+        $res = Invoke-WithRetry -Label "Pricing単発取得(ASIN=$Asin)" -MaxRetries $Config.MaxRetries -LogPath $LogPath -Action {
+            Invoke-RestMethod -Method Get -Uri $uri -Headers (New-SpApiHeaders -AccessToken $AccessToken -Config $Config)
+        }
+    }
+    catch {
+        $detail = Get-ErrorDetail -ErrorRecord $_
+        if ($detail.Class -eq 'Auth' -and $AuthContext) {
+            $AccessToken = Get-LwaAccessTokenCached -ClientId $AuthContext.ClientId -ClientSecret $AuthContext.ClientSecret -RefreshToken $AuthContext.RefreshToken -Config $Config -LogPath $LogPath -TokenCachePath $AuthContext.TokenCachePath -ForceRefresh
+            $res = Invoke-WithRetry -Label "Pricing単発再取得(認証更新,ASIN=$Asin)" -MaxRetries $Config.MaxRetries -LogPath $LogPath -Action {
+                Invoke-RestMethod -Method Get -Uri $uri -Headers (New-SpApiHeaders -AccessToken $AccessToken -Config $Config)
+            }
+        }
+        else {
+            throw
+        }
+    }
+
+    if (-not $res) {
+        throw "ASIN=$Asin の単発価格取得結果が空です。"
+    }
+
+    $statusCode = if ($res.status) { [int]$res.status } else { $null }
+    if ($statusCode -and $statusCode -ge 400) {
+        $bodyText = $res | ConvertTo-Json -Depth 8
+        $detail = Classify-StatusAndBody -StatusCode $statusCode -BodyText $bodyText
+        return [PSCustomObject]@{ Price = $null; ErrorClass = $detail.Class }
+    }
+
+    $offers = if ($res.payload -and $res.payload.Offers) { $res.payload.Offers } else { $res.Offers }
+    $price = Get-LowestNewPriceFromOffers -Offers $offers
+    if ($null -eq $price) {
+        return [PSCustomObject]@{ Price = $null; ErrorClass = 'NotFound/Validation' }
+    }
+
+    return [PSCustomObject]@{ Price = $price; ErrorClass = $null }
 }
 
 function Get-PriceMapByAsinBatch {
@@ -265,15 +485,40 @@ function Get-PriceMapByAsinBatch {
         [array]$Asins,
         [string]$AccessToken,
         [hashtable]$Config,
-        [string]$LogPath
+        [string]$LogPath,
+        [hashtable]$AuthContext
     )
 
     $priceMap = @{}
     $errorClassMap = @{}
-    $chunks = Split-IntoChunks -Items $Asins -ChunkSize $Config.PricingBatchSize
 
-    for ($i = 0; $i -lt $chunks.Count; $i++) {
-        $chunk = $chunks[$i]
+    $singleThreshold = if ($Config.PricingSingleFallbackThreshold) { [int]$Config.PricingSingleFallbackThreshold } else { 3 }
+    if ($Asins.Count -le $singleThreshold) {
+        Write-Log -Message "ASIN件数=$($Asins.Count) のため Pricing単発APIへフォールバックします。" -LogPath $LogPath
+        foreach ($asin in $Asins) {
+            try {
+                $single = Get-PriceBySingleAsin -Asin $asin -AccessToken $AccessToken -Config $Config -LogPath $LogPath -AuthContext $AuthContext
+                $priceMap[$asin] = $single.Price
+                if ($single.ErrorClass) { $errorClassMap[$asin] = $single.ErrorClass }
+                else { $errorClassMap.Remove($asin) | Out-Null }
+            }
+            catch {
+                $detail = Get-ErrorDetail -ErrorRecord $_
+                $priceMap[$asin] = $null
+                $errorClassMap[$asin] = if ($detail.Class) { $detail.Class } else { 'Other' }
+            }
+        }
+
+        return [PSCustomObject]@{ PriceMap = $priceMap; ErrorClassMap = $errorClassMap }
+    }
+
+    $minBatchSize = 5
+    $batchSize = [Math]::Max($minBatchSize, [int]$Config.PricingBatchSize)
+    $index = 0
+
+    while ($index -lt $Asins.Count) {
+        $end = [Math]::Min($index + $batchSize - 1, $Asins.Count - 1)
+        $chunk = @($Asins[$index..$end])
         foreach ($asin in $chunk) { $priceMap[$asin] = $null }
 
         $requests = @()
@@ -283,25 +528,64 @@ function Get-PriceMapByAsinBatch {
 
         $body = @{ requests = $requests } | ConvertTo-Json -Depth 5
 
+        $res = $null
+        $attemptDetail = $null
         try {
-            $res = Invoke-WithRetry -Label "Pricingバッチ取得 ($($i + 1)/$($chunks.Count))" -MaxRetries $Config.MaxRetries -LogPath $LogPath -Action {
-                Invoke-RestMethod -Method Post -Uri "$($Config.SpApiBaseUrl)/batches/products/pricing/v0/itemOffers" -Headers @{
-                    'Authorization'      = "Bearer $AccessToken"
-                    'x-amz-access-token' = $AccessToken
-                    'User-Agent'         = $Config.UserAgent
-                    'Accept'             = 'application/json'
-                    'Content-Type'       = 'application/json'
-                } -Body $body
+            $res = Invoke-WithRetry -Label "Pricingバッチ取得(index=$index,size=$batchSize)" -MaxRetries $Config.MaxRetries -LogPath $LogPath -Action {
+                Invoke-RestMethod -Method Post -Uri "$($Config.SpApiBaseUrl)/batches/products/pricing/v0/itemOffers" -Headers (New-SpApiHeaders -AccessToken $AccessToken -Config $Config -ContentType 'application/json') -Body $body
             }
         }
         catch {
-            $detail = Get-ErrorDetail -ErrorRecord $_
-            foreach ($asin in $chunk) { $errorClassMap[$asin] = $detail.Class }
+            $attemptDetail = Get-ErrorDetail -ErrorRecord $_
+            if ($attemptDetail.Class -eq 'Auth' -and $AuthContext) {
+                try {
+                    $AccessToken = Get-LwaAccessTokenCached -ClientId $AuthContext.ClientId -ClientSecret $AuthContext.ClientSecret -RefreshToken $AuthContext.RefreshToken -Config $Config -LogPath $LogPath -TokenCachePath $AuthContext.TokenCachePath -ForceRefresh
+                    $res = Invoke-WithRetry -Label "Pricingバッチ再取得(認証更新,index=$index,size=$batchSize)" -MaxRetries $Config.MaxRetries -LogPath $LogPath -Action {
+                        Invoke-RestMethod -Method Post -Uri "$($Config.SpApiBaseUrl)/batches/products/pricing/v0/itemOffers" -Headers (New-SpApiHeaders -AccessToken $AccessToken -Config $Config -ContentType 'application/json') -Body $body
+                    }
+                }
+                catch {
+                    $attemptDetail = Get-ErrorDetail -ErrorRecord $_
+                }
+            }
+        }
+
+        if (-not $res) {
+            if ($attemptDetail -and $attemptDetail.Class -eq 'RateLimit/Server' -and $batchSize -gt $minBatchSize) {
+                $nextBatchSize = [Math]::Max($minBatchSize, [int][Math]::Floor($batchSize / 2))
+                Write-Log -Message "Pricingバッチを縮小します: $batchSize -> $nextBatchSize (index=$index, HTTP=$($attemptDetail.StatusCode), limit=$($attemptDetail.RateLimitLimit))" -LogPath $LogPath -Level 'WARN'
+                $batchSize = $nextBatchSize
+                continue
+            }
+
+            if ($chunk.Count -le $singleThreshold) {
+                Write-Log -Message "Pricingバッチ失敗のため単発APIへフォールバックします (index=$index,size=$($chunk.Count))。" -LogPath $LogPath -Level 'WARN'
+                foreach ($asin in $chunk) {
+                    try {
+                        $single = Get-PriceBySingleAsin -Asin $asin -AccessToken $AccessToken -Config $Config -LogPath $LogPath -AuthContext $AuthContext
+                        $priceMap[$asin] = $single.Price
+                        if ($single.ErrorClass) { $errorClassMap[$asin] = $single.ErrorClass }
+                        else { $errorClassMap.Remove($asin) | Out-Null }
+                    }
+                    catch {
+                        $detail = Get-ErrorDetail -ErrorRecord $_
+                        $errorClassMap[$asin] = if ($detail.Class) { $detail.Class } else { 'Other' }
+                    }
+                }
+                $index = $end + 1
+                continue
+            }
+
+            foreach ($asin in $chunk) {
+                $errorClassMap[$asin] = if ($attemptDetail) { $attemptDetail.Class } else { 'Other' }
+            }
+            $index = $end + 1
             continue
         }
 
         if (-not $res.responses) {
             foreach ($asin in $chunk) { $errorClassMap[$asin] = 'Other' }
+            $index = $end + 1
             continue
         }
 
@@ -336,6 +620,8 @@ function Get-PriceMapByAsinBatch {
                 $errorClassMap.Remove($asin) | Out-Null
             }
         }
+
+        $index = $end + 1
     }
 
     [PSCustomObject]@{ PriceMap = $priceMap; ErrorClassMap = $errorClassMap }
@@ -467,6 +753,7 @@ function Invoke-AmazonPriceUpdate {
     $cacheDir = Join-Path $RepoRoot $paths.CacheDir
     $cachePath = Join-Path $RepoRoot $paths.CacheFile
     $historyDir = Join-Path $RepoRoot $paths.HistoryDir
+    $accessTokenCachePath = Join-Path $RepoRoot $paths.AccessTokenCacheFile
 
     foreach ($dir in @($logDir, $cacheDir, $historyDir)) {
         if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
@@ -488,7 +775,13 @@ function Invoke-AmazonPriceUpdate {
     $refreshToken = ConvertTo-PlainText -Secure $secret.refresh_token
 
     Write-Log -Message '更新処理を開始します。' -LogPath $logPath
-    $accessToken = Get-LwaAccessToken -ClientId $clientId -ClientSecret $clientSecret -RefreshToken $refreshToken -Config $Config -LogPath $logPath
+    $authContext = @{
+        ClientId = $clientId
+        ClientSecret = $clientSecret
+        RefreshToken = $refreshToken
+        TokenCachePath = $accessTokenCachePath
+    }
+    $accessToken = Get-LwaAccessTokenCached -ClientId $clientId -ClientSecret $clientSecret -RefreshToken $refreshToken -Config $Config -LogPath $logPath -TokenCachePath $accessTokenCachePath
 
     $excel = $null
     $workbook = $null
@@ -539,7 +832,7 @@ function Invoke-AmazonPriceUpdate {
         }
 
         if ($needApiJans.Count -gt 0) {
-            $catalogResult = Get-AsinMapByJanBatch -Jans $needApiJans -AccessToken $accessToken -Config $Config -LogPath $logPath
+            $catalogResult = Get-AsinMapByJanBatch -Jans $needApiJans -AccessToken $accessToken -Config $Config -LogPath $logPath -AuthContext $authContext
             $asinMap = $catalogResult.AsinMap
             $catalogErrorMap = $catalogResult.ErrorClassMap
             $catalogApiCalls = (Split-IntoChunks -Items $needApiJans -ChunkSize $Config.CatalogBatchSize).Count
@@ -554,10 +847,16 @@ function Invoke-AmazonPriceUpdate {
             $priceErrorMap = @{}
             if ($needPriceAsins.Count -gt 0) {
                 $distinctAsins = @($needPriceAsins | Sort-Object -Unique)
-                $pricingResult = Get-PriceMapByAsinBatch -Asins $distinctAsins -AccessToken $accessToken -Config $Config -LogPath $logPath
+                $pricingResult = Get-PriceMapByAsinBatch -Asins $distinctAsins -AccessToken $accessToken -Config $Config -LogPath $logPath -AuthContext $authContext
                 $priceMap = $pricingResult.PriceMap
                 $priceErrorMap = $pricingResult.ErrorClassMap
-                $pricingApiCalls = (Split-IntoChunks -Items $distinctAsins -ChunkSize $Config.PricingBatchSize).Count
+                $singleThreshold = if ($Config.PricingSingleFallbackThreshold) { [int]$Config.PricingSingleFallbackThreshold } else { 3 }
+                if ($distinctAsins.Count -le $singleThreshold) {
+                    $pricingApiCalls = $distinctAsins.Count
+                }
+                else {
+                    $pricingApiCalls = (Split-IntoChunks -Items $distinctAsins -ChunkSize $Config.PricingBatchSize).Count
+                }
             }
 
             $fetchedAt = (Get-Date).ToString('o')
@@ -678,4 +977,4 @@ function Invoke-AmazonPriceUpdate {
     }
 }
 
-Export-ModuleMember -Function ConvertTo-PlainText,Write-Log,Classify-StatusAndBody,Get-ErrorDetail,Invoke-WithRetry,Split-IntoChunks,Get-LwaAccessToken,Get-LowestNewPriceFromOffers,Get-AsinMapByJanBatch,Get-PriceMapByAsinBatch,Load-PersistentCache,Save-PersistentCache,Append-DailyPriceHistory,Is-CacheFresh,Save-SecretsInteractive,Invoke-AmazonPriceUpdate
+Export-ModuleMember -Function ConvertTo-PlainText,Write-Log,Classify-StatusAndBody,Get-ErrorDetail,Invoke-WithRetry,Get-AmzDateHeaderValue,New-SpApiHeaders,Split-IntoChunks,Read-AccessTokenCache,Save-AccessTokenCache,Get-LwaAccessTokenCached,Get-LwaAccessToken,Get-LowestNewPriceFromOffers,Get-PriceBySingleAsin,Get-AsinMapByJanBatch,Get-PriceMapByAsinBatch,Load-PersistentCache,Save-PersistentCache,Append-DailyPriceHistory,Is-CacheFresh,Save-SecretsInteractive,Invoke-AmazonPriceUpdate
