@@ -564,7 +564,7 @@ function Get-AsinMapByJanBatch {
         foreach ($jan in $chunk) { $resultMap[$jan] = $null }
 
         $identifiers = ($chunk | ForEach-Object { $_.Trim() }) -join ','
-        $uri = "$($Config.SpApiBaseUrl)/catalog/2022-04-01/items?identifiers=$([Uri]::EscapeDataString($identifiers))&identifiersType=EAN&marketplaceIds=$($Config.MarketplaceId)"
+        $uri = "$($Config.SpApiBaseUrl)/catalog/2022-04-01/items?identifiers=$([Uri]::EscapeDataString($identifiers))&identifiersType=JAN&marketplaceIds=$($Config.MarketplaceId)"
 
         $res = $null
         $attemptDetail = $null
@@ -634,7 +634,7 @@ function Get-AsinMapByJanBatch {
                     foreach ($leaf in $leafIdentifiers) {
                         $identifierType = Get-PropertyValue -Object $leaf -Name 'identifierType'
                         $identifierValue = Get-PropertyValue -Object $leaf -Name 'identifier'
-                        if ($identifierType -eq 'EAN' -and $identifierValue) {
+                        if (($idGroup.identifierType -in @('JAN','EAN')) -and $idGroup.identifier) {
                             $matchedJan = [string]$identifierValue
                             break
                         }
