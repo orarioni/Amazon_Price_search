@@ -58,6 +58,24 @@ function Get-HeaderValue {
     return [string]$v
 }
 
+function Get-PropertyValue {
+    param(
+        [object]$Object,
+        [string]$Name
+    )
+
+    if ($null -eq $Object -or [string]::IsNullOrWhiteSpace($Name)) {
+        return $null
+    }
+
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property) {
+        return $null
+    }
+
+    return $property.Value
+}
+
 function Wait-ForPricingSlot {
     param([hashtable]$Config)
     if (-not $script:RunStats) { return }
@@ -583,18 +601,25 @@ function Get-AsinMapByJanBatch {
 
         if ($res.items) {
             foreach ($item in $res.items) {
-                if (-not $item.identifiers -or -not $item.identifiers.identifiers) { continue }
+                $itemIdentifiers = Get-PropertyValue -Object $item -Name 'identifiers'
+                if (-not $itemIdentifiers) { continue }
+
+                $identifierGroups = Get-PropertyValue -Object $itemIdentifiers -Name 'identifiers'
+                if (-not $identifierGroups) { continue }
 
                 $matchedJan = $null
-                foreach ($idGroup in $item.identifiers.identifiers) {
-                    if ($idGroup.identifierType -eq 'EAN' -and $idGroup.identifier) {
-                        $matchedJan = [string]$idGroup.identifier
+                foreach ($idGroup in $identifierGroups) {
+                    $identifierType = Get-PropertyValue -Object $idGroup -Name 'identifierType'
+                    $identifierValue = Get-PropertyValue -Object $idGroup -Name 'identifier'
+                    if ($identifierType -eq 'EAN' -and $identifierValue) {
+                        $matchedJan = [string]$identifierValue
                         break
                     }
                 }
 
-                if ($matchedJan -and $resultMap.ContainsKey($matchedJan) -and $item.asin) {
-                    $resultMap[$matchedJan] = [string]$item.asin
+                $asin = Get-PropertyValue -Object $item -Name 'asin'
+                if ($matchedJan -and $resultMap.ContainsKey($matchedJan) -and $asin) {
+                    $resultMap[$matchedJan] = [string]$asin
                     $errorClassMap.Remove($matchedJan) | Out-Null
                 }
             }
