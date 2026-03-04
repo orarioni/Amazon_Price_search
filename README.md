@@ -23,7 +23,9 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 
 - **OS**: Windows 11（Windows 10 でも概ね動作想定）
 - **Excel**: Microsoft Excel（COM 自動化を利用）
-- **PowerShell**: Windows PowerShell 5.1 以上
+- **PowerShell**: PowerShell 7 (pwsh) 推奨、または Windows PowerShell 5.1 以上
+  - PS 7+ では REST API 呼び出しが標準化され、ヘッダー抽出が効率的
+  - PS 5.1 でも完全互換（Invoke-WebRequest -UseBasicParsing 付与）
 - **ネットワーク**: Amazon API へ HTTPS 接続できること
 - **認証情報**: Amazon SP-API 用の以下3点
   - `client_id`

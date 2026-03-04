@@ -1,6 +1,7 @@
 @{
     MarketplaceId     = 'A1VC38T7YXB528'
-    SpApiBaseUrl      = 'https://sellingpartnerapi-fe.amazon.com'
+    #SpApiBaseUrl      = 'https://sellingpartnerapi-fe.amazon.com' #real world
+    SpApiBaseUrl      = 'https://sandbox.sellingpartnerapi-fe.amazon.com' #sandbox
     UserAgent         = 'AmazonPriceTool/0.4'
     MaxRetries        = 4
     RetryMaxAttempts   = 6

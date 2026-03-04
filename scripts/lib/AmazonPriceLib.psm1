@@ -92,8 +92,8 @@ function Update-PricingThrottleFromLimit {
 
     $baseInterval = if ($Config.PricingMinIntervalSec) { [double]$Config.PricingMinIntervalSec } else { 2.2 }
     if ($RateLimitLimit) {
-        $limit = 0.0
-        if ([double]::TryParse($RateLimitLimit, [ref]$limit) -and $limit -gt 0) {
+        $limit = $RateLimitLimit -as [double]
+        if ($limit -and $limit -gt 0) {
             if ($limit -le 0.5) { $baseInterval = Get-Random -Minimum 2.2 -Maximum 2.5 }
             elseif ($limit -le 1.0) { $baseInterval = Get-Random -Minimum 1.1 -Maximum 1.3 }
             else { $baseInterval = [Math]::Max(0.4, (1.0 / $limit) * 1.2) }
@@ -249,16 +249,17 @@ function Get-ErrorDetail {
                     $retryAfterRaw = $headers['Retry-After']
                     if (-not $retryAfterRaw) { $retryAfterRaw = $headers['retry-after'] }
                     if ($retryAfterRaw) {
-                        $retryAfterInt = 0
-                        if ([int]::TryParse([string]$retryAfterRaw, [ref]$retryAfterInt)) {
+                        $retryAfterInt = $retryAfterRaw -as [int]
+                        if ($retryAfterInt -and $retryAfterInt -gt 0) {
                             $retryAfterSec = [Math]::Max(1, $retryAfterInt)
                         }
                         else {
-                            $retryAfterDate = $null
-                            if ([DateTime]::TryParse([string]$retryAfterRaw, [ref]$retryAfterDate)) {
+                            try {
+                                $retryAfterDate = [DateTime]::ParseExact($retryAfterRaw, 'r', [System.Globalization.CultureInfo]::InvariantCulture)
                                 $delta = [int][Math]::Ceiling(($retryAfterDate - (Get-Date)).TotalSeconds)
                                 if ($delta -gt 0) { $retryAfterSec = $delta }
                             }
+                            catch { }
                         }
                     }
 
@@ -394,8 +395,12 @@ function Read-AccessTokenCache {
         $parsed = ConvertFrom-Json -InputObject $raw
         if (-not $parsed -or -not $parsed.token -or -not $parsed.expires_at) { return $null }
 
-        $expiresAt = $null
-        if (-not [DateTime]::TryParse($parsed.expires_at, [ref]$expiresAt)) { return $null }
+        try {
+            $expiresAt = [DateTime]::Parse($parsed.expires_at)
+        }
+        catch {
+            return $null
+        }
 
         [PSCustomObject]@{ token = [string]$parsed.token; expires_at = $expiresAt }
     }
@@ -935,8 +940,12 @@ function Test-CacheFresh {
 
     if (-not $Entry -or -not $Entry.fetched_at) { return $false }
 
-    $fetchedAt = $null
-    if (-not [DateTime]::TryParse($Entry.fetched_at, [ref]$fetchedAt)) { return $false }
+    try {
+        $fetchedAt = [DateTime]::Parse($Entry.fetched_at)
+    }
+    catch {
+        return $false
+    }
 
     return ((Get-Date) - $fetchedAt).TotalHours -lt $TtlHours
 }
