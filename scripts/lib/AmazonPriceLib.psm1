@@ -124,13 +124,18 @@ function Invoke-SpApiRequest {
             if ($Endpoint -match '^PricingBatch') { $script:RunStats.PricingBatchCalls++ }
             if ($Endpoint -match '^CatalogBatch') { $script:RunStats.CatalogBatchCalls++ }
 
-            # PS5.1 doesn't support -ResponseHeadersVariable; use Invoke-WebRequest
             $params = @{ Method = $Method; Uri = $Uri; Headers = $Headers }
             if ($null -ne $Body -and "$Body" -ne '') { $params.Body = $Body }
-            $raw = Invoke-WebRequest @params
-            $responseHeaders = $raw.Headers
-            # attempt to parse body as JSON
-            try { $res = $raw.Content | ConvertFrom-Json } catch { $res = $null }
+
+            $irmCommand = Get-Command -Name 'Invoke-RestMethod' -ErrorAction Stop
+            if ($irmCommand.Parameters.ContainsKey('ResponseHeadersVariable')) {
+                $res = Invoke-RestMethod @params -ResponseHeadersVariable responseHeaders
+            }
+            else {
+                $res = Invoke-RestMethod @params
+                $responseHeaders = $null
+                Write-Log -Message "$Endpoint success: response headers unavailable on this PowerShell runtime" -LogPath $LogPath -Level 'WARN'
+            }
 
             $limit = Get-HeaderValue -Headers $responseHeaders -Name 'x-amzn-RateLimit-Limit'
             $requestId = Get-HeaderValue -Headers $responseHeaders -Name 'x-amzn-RequestId'
