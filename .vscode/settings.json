@@ -1,0 +1,8 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^powershell -NoProfile -ExecutionPolicy Bypass -Command \"\\(Get-Content visualize_logs\\.ps1\\) -join '`n' \\| Select-String '\\{' \\| Measure-Object; \\(Get-Content visualize_logs\\.ps1\\) -join '`n' \\| Select-String '\\}' \\| Measure-Object\"$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}
