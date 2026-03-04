@@ -604,17 +604,42 @@ function Get-AsinMapByJanBatch {
                 $itemIdentifiers = Get-PropertyValue -Object $item -Name 'identifiers'
                 if (-not $itemIdentifiers) { continue }
 
-                $identifierGroups = Get-PropertyValue -Object $itemIdentifiers -Name 'identifiers'
-                if (-not $identifierGroups) { continue }
+                $identifierGroups = @()
+                # Catalog Items API の identifiers は配列で返る実装があるため、
+                # 直接配列として扱える場合はそのまま利用する。
+                if ($itemIdentifiers -is [System.Collections.IEnumerable] -and -not ($itemIdentifiers -is [string])) {
+                    $identifierGroups = @($itemIdentifiers)
+                }
+                else {
+                    $nestedGroups = Get-PropertyValue -Object $itemIdentifiers -Name 'identifiers'
+                    if ($nestedGroups) {
+                        $identifierGroups = @($nestedGroups)
+                    }
+                }
+                if ($identifierGroups.Count -eq 0) { continue }
 
                 $matchedJan = $null
                 foreach ($idGroup in $identifierGroups) {
-                    $identifierType = Get-PropertyValue -Object $idGroup -Name 'identifierType'
-                    $identifierValue = Get-PropertyValue -Object $idGroup -Name 'identifier'
-                    if ($identifierType -eq 'EAN' -and $identifierValue) {
-                        $matchedJan = [string]$identifierValue
-                        break
+                    # identifiers 配下に identifiers 配列がネストされるケースと、
+                    # 直接 identifierType/identifier を持つケースの両方に対応する。
+                    $leafIdentifiers = @()
+                    $nestedLeafIdentifiers = Get-PropertyValue -Object $idGroup -Name 'identifiers'
+                    if ($nestedLeafIdentifiers) {
+                        $leafIdentifiers = @($nestedLeafIdentifiers)
                     }
+                    else {
+                        $leafIdentifiers = @($idGroup)
+                    }
+
+                    foreach ($leaf in $leafIdentifiers) {
+                        $identifierType = Get-PropertyValue -Object $leaf -Name 'identifierType'
+                        $identifierValue = Get-PropertyValue -Object $leaf -Name 'identifier'
+                        if ($identifierType -eq 'EAN' -and $identifierValue) {
+                            $matchedJan = [string]$identifierValue
+                            break
+                        }
+                    }
+                    if ($matchedJan) { break }
                 }
 
                 $asin = Get-PropertyValue -Object $item -Name 'asin'
