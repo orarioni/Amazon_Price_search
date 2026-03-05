@@ -183,6 +183,42 @@ function Get-CatalogIdentifierSampleText {
     return ($samples -join ';')
 }
 
+function Expand-CatalogItems {
+    param([object]$Items)
+
+    if ($null -eq $Items) { return @() }
+
+    $arr = ConvertTo-ObjectArray -Value $Items
+    if ($arr.Count -eq 1) {
+        $single = $arr[0]
+        $singleAsin = Get-PropertyValue -Object $single -Name 'asin'
+        if (-not $singleAsin) {
+            $nestedItems = Get-PropertyValue -Object $single -Name 'items'
+            if ($nestedItems) {
+                return ConvertTo-ObjectArray -Value $nestedItems
+            }
+
+            $nestedItem = Get-PropertyValue -Object $single -Name 'item'
+            if ($nestedItem) {
+                return ConvertTo-ObjectArray -Value $nestedItem
+            }
+
+            $propertyNames = @($single.PSObject.Properties.Name)
+            if ($propertyNames.Count -gt 0 -and ($propertyNames | Where-Object { $_ -match '^\d+$' }).Count -gt 0) {
+                $values = @()
+                foreach ($name in $propertyNames | Sort-Object {[int]$_}) {
+                    $values += $single.PSObject.Properties[$name].Value
+                }
+                if ($values.Count -gt 0) {
+                    return @($values)
+                }
+            }
+        }
+    }
+
+    return @($arr)
+}
+
 function Write-SpApiResponseShapeLog {
     param(
         [string]$Endpoint,
@@ -818,7 +854,7 @@ function Get-AsinMapByJanBatch {
 
         if (-not $Items) { return }
 
-        foreach ($item in $Items) {
+        foreach ($item in (Expand-CatalogItems -Items $Items)) {
             $itemIdentifiers = Get-PropertyValue -Object $item -Name 'identifiers'
             if (-not $itemIdentifiers) { continue }
 
@@ -932,7 +968,9 @@ function Get-AsinMapByJanBatch {
         $unresolvedJans = @($chunk | Where-Object { -not $resultMap[$_] })
         if ($unresolvedJans.Count -eq $chunk.Count) {
             $sampleText = Get-CatalogIdentifierSampleText -Items $catalogItems
-            Write-Log -Message "Catalog parse diagnostic: all unresolved in chunk (index=$index,size=$($chunk.Count), response.items.type=$(Get-ObjectTypeName -Value $catalogItems), response.props=$((@($res.PSObject.Properties.Name) -join ',')), sample.identifiers=$sampleText)" -LogPath $LogPath -Level 'WARN'
+            $numberOfResults = Get-PropertyValue -Object $res -Name 'numberOfResults'
+            $expandedCount = (Expand-CatalogItems -Items $catalogItems).Count
+            Write-Log -Message "Catalog parse diagnostic: all unresolved in chunk (index=$index,size=$($chunk.Count), response.items.type=$(Get-ObjectTypeName -Value $catalogItems), expanded.items.count=$expandedCount, numberOfResults=$numberOfResults, response.props=$((@($res.PSObject.Properties.Name) -join ',')), sample.identifiers=$sampleText)" -LogPath $LogPath -Level 'WARN'
         }
         Write-Log -Message "EANフォールバック件数: $($unresolvedJans.Count)件 (index=$index)" -LogPath $LogPath
         if ($unresolvedJans.Count -gt 0) {
