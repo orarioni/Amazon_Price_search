@@ -1,11 +1,12 @@
-﻿Set-StrictMode -Version Latest
-$ErrorActionPreference = 'Stop'
-
-param(
+﻿param(
     [ValidateSet('x64', 'x86', 'arm64')]
     [string]$Architecture = 'x64',
     [string]$OutputDirectory = '.\\installers'
 )
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
 
 function Resolve-LatestPwshMsiAsset {
     param([string]$Arch)
