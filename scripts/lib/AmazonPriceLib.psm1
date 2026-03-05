@@ -31,7 +31,9 @@ function Initialize-RunStats {
     $script:RunStats = [ordered]@{
         TotalApiCalls      = 0
         PricingCalls       = 0
+        CatalogCalls      = 0
         CatalogBatchCalls  = 0
+        CatalogSingleCalls = 0
         RetryCount         = 0
         Http429Count       = 0
         TotalWaitSec       = 0.0
@@ -239,7 +241,14 @@ function Invoke-SpApiRequest {
         try {
             if ($script:RunStats) { $script:RunStats.TotalApiCalls++ }
             if ($Endpoint -match '^Pricing') { $script:RunStats.PricingCalls++ }
-            if ($Endpoint -match '^CatalogBatch') { $script:RunStats.CatalogBatchCalls++ }
+            if ($Endpoint -match '^CatalogBatch') {
+                $script:RunStats.CatalogBatchCalls++
+                $script:RunStats.CatalogCalls++
+            }
+            elseif ($Endpoint -match '^CatalogSingle') {
+                $script:RunStats.CatalogSingleCalls++
+                $script:RunStats.CatalogCalls++
+            }
 
             $params = @{ Method = $Method; Uri = $Uri; Headers = $Headers }
             if ($null -ne $Body -and "$Body" -ne '') { $params.Body = $Body }
@@ -1214,6 +1223,8 @@ function Invoke-AmazonPriceUpdate {
         $cacheHitCount = 0
         $cacheMissCount = 0
         $catalogApiCalls = 0
+        $catalogBatchApiCalls = 0
+        $catalogSingleApiCalls = 0
         $pricingApiCalls = 0
         $notFoundValidationCount = 0
         $rateLimitServerCount = 0
@@ -1250,7 +1261,9 @@ function Invoke-AmazonPriceUpdate {
             $catalogResult = Get-AsinMapByJanBatch -Jans $needApiJans -AccessToken $accessToken -Config $Config -LogPath $logPath -AuthContext $authContext
             $asinMap = $catalogResult.AsinMap
             $catalogErrorMap = $catalogResult.ErrorClassMap
-            $catalogApiCalls = $script:RunStats.CatalogBatchCalls
+            $catalogApiCalls = $script:RunStats.CatalogCalls
+            $catalogBatchApiCalls = $script:RunStats.CatalogBatchCalls
+            $catalogSingleApiCalls = $script:RunStats.CatalogSingleCalls
 
             $allAsins = @($asinMap.Values | Where-Object { $_ } | Sort-Object -Unique)
             $uniqueAsinCount = $allAsins.Count
@@ -1411,10 +1424,10 @@ function Invoke-AmazonPriceUpdate {
         $avgWait = if ($script:RunStats.WaitEvents -gt 0) { [Math]::Round($script:RunStats.TotalWaitSec / $script:RunStats.WaitEvents, 2) } else { 0 }
         $apiReducedBase = [Math]::Max(1, $uniqueAsinCount)
         $pricingReductionPct = [Math]::Round((1 - ([double]$pricingApiCalls / [double]$apiReducedBase)) * 100, 2)
-        Write-Log -Message "呼び出し統計: input_rows=$totalDataRows, unique_jan=$($janList.Count), unique_asin=$uniqueAsinCount, cache_hit=$cacheHitCount, cache_miss=$cacheMissCount, catalog_calls=$catalogApiCalls, pricing_calls=$pricingApiCalls, pricing_reduction_pct=$pricingReductionPct" -LogPath $logPath
+        Write-Log -Message "呼び出し統計: input_rows=$totalDataRows, unique_jan=$($janList.Count), unique_asin=$uniqueAsinCount, cache_hit=$cacheHitCount, cache_miss=$cacheMissCount, catalog_calls=$catalogApiCalls, catalog_batch_calls=$catalogBatchApiCalls, catalog_single_calls=$catalogSingleApiCalls, pricing_calls=$pricingApiCalls, pricing_reduction_pct=$pricingReductionPct" -LogPath $logPath
         Write-Log -Message "再試行統計: api_total_calls=$($script:RunStats.TotalApiCalls), retry_count=$($script:RunStats.RetryCount), http429_count=$($script:RunStats.Http429Count), total_wait_sec=$([Math]::Round($script:RunStats.TotalWaitSec,2)), avg_wait_sec=$avgWait" -LogPath $logPath
         $metricsPath = Join-Path $logDir 'metrics.jsonl'
-        $metricsRecord = [PSCustomObject]@{ ts=(Get-Date).ToString('o'); input_rows=$totalDataRows; unique_jan=$($janList.Count); unique_asin=$uniqueAsinCount; pricing_calls=$pricingApiCalls; pricing_reduction_pct=$pricingReductionPct; api_total_calls=$($script:RunStats.TotalApiCalls); retry_count=$($script:RunStats.RetryCount); http429_count=$($script:RunStats.Http429Count); total_wait_sec=[Math]::Round($script:RunStats.TotalWaitSec,2); avg_wait_sec=$avgWait }
+        $metricsRecord = [PSCustomObject]@{ ts=(Get-Date).ToString('o'); input_rows=$totalDataRows; unique_jan=$($janList.Count); unique_asin=$uniqueAsinCount; catalog_calls=$catalogApiCalls; catalog_batch_calls=$catalogBatchApiCalls; catalog_single_calls=$catalogSingleApiCalls; pricing_calls=$pricingApiCalls; pricing_reduction_pct=$pricingReductionPct; api_total_calls=$($script:RunStats.TotalApiCalls); retry_count=$($script:RunStats.RetryCount); http429_count=$($script:RunStats.Http429Count); total_wait_sec=[Math]::Round($script:RunStats.TotalWaitSec,2); avg_wait_sec=$avgWait }
         Add-Content -Path $metricsPath -Value ($metricsRecord | ConvertTo-Json -Compress -Depth 5) -Encoding UTF8
         $totalUnresolvedCount = $notFoundValidationCount + $rateLimitServerCount + $otherErrorCount
         Write-Log -Message "エラー分類統計: NotFound/Validation=$notFoundValidationCount, RateLimit/Server=$rateLimitServerCount, Other=$otherErrorCount" -LogPath $logPath

@@ -159,7 +159,7 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
   - `一時エラー件数`: `RateLimit/Server` と `Other` のうち再試行対象になり得る一時的失敗件数（当該行は空欄で継続）
   - `未解決件数`: `NotFound/Validation + RateLimit/Server + Other` の合計件数（最終的に解決できず空欄出力になった件数）
 - レート制限関連では `x-amzn-RateLimit-Limit` / `Retry-After` をログに残し、運用時の上限把握に利用
-- 終了時に `input_rows / unique_asin / pricing_calls / pricing_reduction_pct / http429_count / avg_wait_sec` を出力
+- 終了時に `input_rows / unique_asin / catalog_calls (batch/single内訳) / pricing_calls / pricing_reduction_pct / http429_count / avg_wait_sec` を出力
 
 トラブル時はまず `logs/run.log` を確認してください。
 
