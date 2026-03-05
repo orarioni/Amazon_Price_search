@@ -605,8 +605,8 @@ function Get-AsinMapByJanBatch {
                 if (-not $itemIdentifiers) { continue }
 
                 $identifierGroups = @()
-                # Catalog Items API の identifiers は配列で返る実装があるため、
-                # 直接配列として扱える場合はそのまま利用する。
+                # Catalog Items API の res.items.identifiers は「直接配列」または
+                # 「identifiers 配下にネストされた配列」の両形式で返る前提で処理する。
                 if ($itemIdentifiers -is [System.Collections.IEnumerable] -and -not ($itemIdentifiers -is [string])) {
                     $identifierGroups = @($itemIdentifiers)
                 }
@@ -634,8 +634,8 @@ function Get-AsinMapByJanBatch {
                     foreach ($leaf in $leafIdentifiers) {
                         $identifierType = Get-PropertyValue -Object $leaf -Name 'identifierType'
                         $identifierValue = Get-PropertyValue -Object $leaf -Name 'identifier'
-                        if (($idGroup.identifierType -in @('JAN','EAN')) -and $idGroup.identifier) {
-                            $matchedJan = [string]$identifierValue
+                        if (($identifierType -in @('JAN','EAN')) -and -not [string]::IsNullOrWhiteSpace([string]$identifierValue)) {
+                            $matchedJan = ([string]$identifierValue).Trim()
                             break
                         }
                     }
@@ -643,9 +643,12 @@ function Get-AsinMapByJanBatch {
                 }
 
                 $asin = Get-PropertyValue -Object $item -Name 'asin'
-                if ($matchedJan -and $resultMap.ContainsKey($matchedJan) -and $asin) {
-                    $resultMap[$matchedJan] = [string]$asin
-                    $errorClassMap.Remove($matchedJan) | Out-Null
+                if ($matchedJan -and $asin) {
+                    $lookupJan = $matchedJan.Trim()
+                    if ($resultMap.ContainsKey($lookupJan)) {
+                        $resultMap[$lookupJan] = [string]$asin
+                        $errorClassMap.Remove($lookupJan) | Out-Null
+                    }
                 }
             }
         }
