@@ -30,7 +30,7 @@ function Write-Log {
 function Initialize-RunStats {
     $script:RunStats = [ordered]@{
         TotalApiCalls      = 0
-        PricingBatchCalls  = 0
+        PricingCalls       = 0
         CatalogBatchCalls  = 0
         RetryCount         = 0
         Http429Count       = 0
@@ -234,7 +234,7 @@ function Invoke-SpApiRequest {
         $responseHeaders = $null
         try {
             if ($script:RunStats) { $script:RunStats.TotalApiCalls++ }
-            if ($Endpoint -match '^Pricing') { $script:RunStats.PricingBatchCalls++ }
+            if ($Endpoint -match '^Pricing') { $script:RunStats.PricingCalls++ }
             if ($Endpoint -match '^CatalogBatch') { $script:RunStats.CatalogBatchCalls++ }
 
             $params = @{ Method = $Method; Uri = $Uri; Headers = $Headers }
@@ -857,6 +857,7 @@ function Get-PriceBySingleAsin {
     return [PSCustomObject]@{ Price = $price; ErrorClass = $null }
 }
 
+# NOTE: 互換性のため関数名は Batch のまま維持していますが、実装は単発Pricingを順次実行します。
 function Get-PriceMapByAsinBatch {
     param(
         [array]$Asins,
@@ -1126,6 +1127,7 @@ function Invoke-AmazonPriceUpdate {
 
         $janList = @($targetJans)
         $needApiJans = @()
+        Write-Log -Message "依存チェック: 入力JAN収集完了 (rows=$totalDataRows, unique_jan=$($janList.Count))" -LogPath $logPath
 
         foreach ($jan in $janList) {
             $janCacheKey = Get-JanCacheKey -MarketplaceId $Config.MarketplaceId -Jan $jan
@@ -1140,6 +1142,7 @@ function Invoke-AmazonPriceUpdate {
         }
 
         $uniqueAsinCount = 0
+        Write-Log -Message "依存チェック: JANキャッシュ判定完了 (api_required_jan=$($needApiJans.Count))" -LogPath $logPath
         if ($needApiJans.Count -gt 0) {
             $catalogResult = Get-AsinMapByJanBatch -Jans $needApiJans -AccessToken $accessToken -Config $Config -LogPath $logPath -AuthContext $authContext
             $asinMap = $catalogResult.AsinMap
@@ -1176,9 +1179,10 @@ function Invoke-AmazonPriceUpdate {
                 $pricingResult = Get-PriceMapByAsinBatch -Asins $distinctAsins -AccessToken $accessToken -Config $Config -LogPath $logPath -AuthContext $authContext
                 foreach ($k in $pricingResult.PriceMap.Keys) { $priceMap[$k] = $pricingResult.PriceMap[$k] }
                 foreach ($k in $pricingResult.ErrorClassMap.Keys) { $priceErrorMap[$k] = $pricingResult.ErrorClassMap[$k] }
-                $pricingApiCalls = $script:RunStats.PricingBatchCalls
+                $pricingApiCalls = $script:RunStats.PricingCalls
             }
 
+            Write-Log -Message "依存チェック: Pricing確定 (need_price_asin=$($needPriceAsins.Count), resolved_asin=$uniqueAsinCount)" -LogPath $logPath
             $fetchedAt = (Get-Date).ToString('o')
             foreach ($jan in $needApiJans) {
                 $cacheStatus = 'ok'
@@ -1288,6 +1292,7 @@ function Invoke-AmazonPriceUpdate {
             $processed++
         }
 
+        Write-Log -Message "依存チェック: runCache確定・Excel反映完了" -LogPath $logPath
         Save-PersistentCache -CacheMap $persistentCache -Path $cachePath
         $historySavedCount = Add-DailyPriceHistory -RunCache $runCache -DirPath $historyDir
         Write-Log -Message "価格履歴の追記件数: $historySavedCount" -LogPath $logPath

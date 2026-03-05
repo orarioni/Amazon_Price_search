@@ -56,7 +56,7 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 2. Excel を閉じる
 3. `run_update.bat` を実行
 4. `data/output.xlsx` を確認
-   - 実行中はコンソールに `進捗: 現在件数 / 入力件数` を表示します（約10行ごと）。
+   - 実行中はコンソールに `進捗: 現在件数 / 入力件数` を表示します（50行ごと）。
 
 `run_update.bat` は内部で `scripts/10_update_excel.ps1` を実行します。
 
@@ -84,6 +84,24 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 - 該当商品なし（NotFound/Validation）は G/H/I を空欄化
 - 一時エラー（RateLimit/Server など）は当該行のみ空欄で継続（全体停止しない）
 
+
+## 取得〜output までの依存関係（実装順）
+
+更新処理（`Invoke-AmazonPriceUpdate`）では、次の依存順でデータを確定します。
+
+1. **入力収集**: `input.xlsx` の B列から JAN を収集（重複JANは集約）
+2. **JANキャッシュ判定**: `cache/price_cache.json` の JAN→ASIN エントリを TTL 判定
+3. **Catalog API**: 未解決JANのみ `Get-AsinMapByJanBatch` で ASIN 解決
+4. **Offerキャッシュ判定**: ASINごとに Offer キャッシュを TTL 判定
+5. **Pricing API（単発）**: 未解決ASINのみ `Get-PriceBySingleAsin` を順次呼び出し
+6. **runCache確定**: JAN単位で `asin / price / fetched_at / cache_status` を確定
+7. **Excel反映**: runCache をもとに G/H/I 列へ出力
+8. **永続化**: `cache/price_cache.json` と `cache/history/prices_YYYY-MM-DD.jsonl` を更新
+9. **保存**: `data/output.xlsx` に SaveAs して終了メトリクスをログ出力
+
+この順序により、**ASINや価格が未確定のまま output へ反映されない**ように依存関係を固定しています。
+
+---
 
 ### 「最安」の定義（運用ルール）
 
