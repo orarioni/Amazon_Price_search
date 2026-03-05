@@ -8,6 +8,7 @@
     RetryMaxWaitSec    = 120
     CatalogBatchSize  = 20
     PricingMinIntervalSec = 2.2
+    PricingBatchSize = 20
     DebugSpApiResponse = $true
     DebugSpApiResponseMaxChars = 4000
     JanAsinCacheTtlHours = 168

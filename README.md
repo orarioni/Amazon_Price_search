@@ -93,7 +93,7 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 2. **JANキャッシュ判定**: `cache/price_cache.json` の JAN→ASIN エントリを TTL 判定
 3. **Catalog API**: 未解決JANのみ `Get-AsinMapByJanBatch` で ASIN 解決
 4. **Offerキャッシュ判定**: ASINごとに Offer キャッシュを TTL 判定
-5. **Pricing API（単発）**: 未解決ASINのみ `Get-PriceBySingleAsin` を順次呼び出し
+5. **Pricing API（バッチ優先）**: `getPricing` バッチ取得後、`retryable` / `payload欠落` のみ単発フォールバック
 6. **runCache確定**: JAN単位で `asin / price / fetched_at / cache_status` を確定
 7. **Excel反映**: runCache をもとに G/H/I 列へ出力
 8. **永続化**: `cache/price_cache.json` と `cache/history/prices_YYYY-MM-DD.jsonl` を更新
@@ -244,8 +244,9 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 ## 運用メモ
 
 - API呼び出し回数を抑えるため、同一JANは自動で集約処理されます。
-- Pricing呼び出しは基本直列で、最小間隔を保ちながら動的スロットリングします。
-- Pricing呼び出しはASINごとの単発取得に統一しており、配列リクエストは使用しません。
-- 件数が多い場合は実行時間が伸びるため、更新バッチを分けると切り分けしやすくなります。
+- Pricingは `getPricing`（`/products/pricing/v0/price`）のバッチ取得を優先し、未解決ASINのみ単発取得へフォールバックします。
+- バッチ応答はASIN単位で `resolved / retryable / not_found / auth_error` に分類し、単発フォールバック対象を `retryable` と `payload欠落(分類不明)` のみに限定します。
+- `not_found` / `validation` は単発再試行せず確定し、`auth_error`（401/403）は早期中断します。
+- 単発フォールバック時は最小間隔を保ちながら動的スロットリングします。
 - 定期運用前に、少件数データで `output.xlsx` と `logs/run.log` の内容を一度確認することを推奨します。
 - 実行後は `logs/run.log` の終了メトリクスで `unique_asin` と `pricing_calls` がどちらも 0 以外であることを確認してください。

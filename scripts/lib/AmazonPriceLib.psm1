@@ -915,6 +915,148 @@ function Get-PriceBySingleAsin {
     return [PSCustomObject]@{ Price = $price; ErrorClass = $null }
 }
 
+function Classify-PricingBatchItem {
+    param(
+        [object]$Item,
+        [string]$Asin
+    )
+
+    $statusRaw = Get-PropertyValue -Object $Item -Name 'status'
+    $statusCode = $null
+    if ($null -ne $statusRaw -and "$statusRaw" -ne '') { $statusCode = [int]$statusRaw }
+
+    $body = Get-PropertyValue -Object $Item -Name 'body'
+    $bodyText = if ($body) { $body | ConvertTo-Json -Depth 10 -Compress } else { '' }
+    $classification = Get-StatusClassification -StatusCode $statusCode -BodyText $bodyText
+
+    $payload = Get-PropertyValue -Object $body -Name 'payload'
+    $payloadOffers = Get-PropertyValue -Object $payload -Name 'Offers'
+    $offers = if ($payloadOffers) { $payloadOffers } else { Get-PropertyValue -Object $body -Name 'Offers' }
+    $price = Get-LowestNewPriceFromOffers -Offers $offers
+
+    if ($null -ne $price) {
+        return [PSCustomObject]@{ Asin = $Asin; State = 'resolved'; Price = $price; ErrorClass = $null }
+    }
+
+    if ($classification.Class -eq 'Auth') {
+        return [PSCustomObject]@{ Asin = $Asin; State = 'auth_error'; Price = $null; ErrorClass = 'Auth' }
+    }
+
+    if ($classification.Class -eq 'RateLimit/Server') {
+        return [PSCustomObject]@{ Asin = $Asin; State = 'retryable'; Price = $null; ErrorClass = 'RateLimit/Server' }
+    }
+
+    if ($classification.Class -eq 'NotFound/Validation') {
+        return [PSCustomObject]@{ Asin = $Asin; State = 'not_found'; Price = $null; ErrorClass = 'NotFound/Validation' }
+    }
+
+    return [PSCustomObject]@{ Asin = $Asin; State = 'retryable'; Price = $null; ErrorClass = 'Other' }
+}
+
+function Get-PriceMapByAsinBatchPrimary {
+    param(
+        [array]$Asins,
+        [string]$AccessToken,
+        [hashtable]$Config,
+        [string]$LogPath,
+        [hashtable]$AuthContext
+    )
+
+    $priceMap = @{}
+    $errorClassMap = @{}
+    $stateMap = @{}
+
+    if (-not $Asins -or $Asins.Count -eq 0) {
+        return [PSCustomObject]@{ PriceMap = $priceMap; ErrorClassMap = $errorClassMap; StateMap = $stateMap }
+    }
+
+    $batchSize = if ($Config.PricingBatchSize) { [Math]::Max(1, [int]$Config.PricingBatchSize) } else { 20 }
+    $index = 0
+
+    while ($index -lt $Asins.Count) {
+        $end = [Math]::Min($index + $batchSize - 1, $Asins.Count - 1)
+        $chunk = @($Asins[$index..$end])
+        foreach ($asin in $chunk) {
+            if (-not $priceMap.ContainsKey($asin)) { $priceMap[$asin] = $null }
+            if (-not $stateMap.ContainsKey($asin)) { $stateMap[$asin] = 'retryable' }
+        }
+
+        $asinQuery = ($chunk | ForEach-Object { $_.Trim() }) -join ','
+        $uri = "$($Config.SpApiBaseUrl)/products/pricing/v0/price?MarketplaceId=$($Config.MarketplaceId)&ItemType=Asin&Asins=$([Uri]::EscapeDataString($asinQuery))&ItemCondition=New"
+        $res = $null
+
+        try {
+            $res = Invoke-SpApiRequest -Endpoint "PricingBatch(index=$index,size=$batchSize)" -Method 'Get' -Uri $uri -Headers (New-SpApiHeaders -AccessToken $AccessToken -Config $Config) -Config $Config -LogPath $LogPath
+        }
+        catch {
+            $detail = Get-ErrorDetail -ErrorRecord $_
+            if ($detail.Class -eq 'Auth' -and $AuthContext) {
+                try {
+                    $AccessToken = Get-LwaAccessTokenCached -ClientId $AuthContext.ClientId -ClientSecret $AuthContext.ClientSecret -RefreshToken $AuthContext.RefreshToken -Config $Config -LogPath $LogPath -TokenCachePath $AuthContext.TokenCachePath -ForceRefresh
+                    $res = Invoke-SpApiRequest -Endpoint "PricingBatchAuthRetry(index=$index,size=$batchSize)" -Method 'Get' -Uri $uri -Headers (New-SpApiHeaders -AccessToken $AccessToken -Config $Config) -Config $Config -LogPath $LogPath
+                }
+                catch {
+                    $detail = Get-ErrorDetail -ErrorRecord $_
+                }
+            }
+
+            if (-not $res) {
+                foreach ($asin in $chunk) {
+                    if ($detail.Class -eq 'Auth') {
+                        $stateMap[$asin] = 'auth_error'
+                        $errorClassMap[$asin] = 'Auth'
+                    }
+                    else {
+                        $stateMap[$asin] = 'retryable'
+                        $errorClassMap[$asin] = if ($detail.Class) { $detail.Class } else { 'Other' }
+                    }
+                }
+                if ($detail.Class -eq 'Auth') {
+                    return [PSCustomObject]@{ PriceMap = $priceMap; ErrorClassMap = $errorClassMap; StateMap = $stateMap; HasAuthError = $true }
+                }
+                $index = $end + 1
+                continue
+            }
+        }
+
+        $responses = Get-PropertyValue -Object $res -Name 'responses'
+        $responseItems = if ($responses) { @($responses) } else { @($res) }
+        $responseByAsin = @{}
+        foreach ($item in $responseItems) {
+            $body = Get-PropertyValue -Object $item -Name 'body'
+            $payload = Get-PropertyValue -Object $body -Name 'payload'
+            $asinInPayload = Get-PropertyValue -Object $payload -Name 'ASIN'
+            if (-not $asinInPayload) {
+                $identifier = Get-PropertyValue -Object $item -Name 'identifier'
+                if ($identifier) { $asinInPayload = [string]$identifier }
+            }
+            if ($asinInPayload) { $responseByAsin[$asinInPayload] = $item }
+        }
+
+        foreach ($asin in $chunk) {
+            if (-not $responseByAsin.ContainsKey($asin)) {
+                $stateMap[$asin] = 'retryable'
+                $errorClassMap[$asin] = 'Other'
+                continue
+            }
+
+            $classified = Classify-PricingBatchItem -Item $responseByAsin[$asin] -Asin $asin
+            $stateMap[$asin] = $classified.State
+            $priceMap[$asin] = $classified.Price
+            if ($classified.ErrorClass) { $errorClassMap[$asin] = $classified.ErrorClass }
+            else { $errorClassMap.Remove($asin) | Out-Null }
+
+            if ($classified.State -eq 'auth_error') {
+                return [PSCustomObject]@{ PriceMap = $priceMap; ErrorClassMap = $errorClassMap; StateMap = $stateMap; HasAuthError = $true }
+            }
+        }
+
+        $index = $end + 1
+    }
+
+    return [PSCustomObject]@{ PriceMap = $priceMap; ErrorClassMap = $errorClassMap; StateMap = $stateMap; HasAuthError = $false }
+}
+
 function Get-PriceMapByAsinSequential {
     param(
         [array]$Asins,
@@ -946,6 +1088,58 @@ function Get-PriceMapByAsinSequential {
     [PSCustomObject]@{ PriceMap = $priceMap; ErrorClassMap = $errorClassMap }
 }
 
+function Get-PriceMapByAsinWithFallback {
+    param(
+        [array]$Asins,
+        [string]$AccessToken,
+        [hashtable]$Config,
+        [string]$LogPath,
+        [hashtable]$AuthContext
+    )
+
+    $batchResult = Get-PriceMapByAsinBatchPrimary -Asins $Asins -AccessToken $AccessToken -Config $Config -LogPath $LogPath -AuthContext $AuthContext
+    if ($batchResult.HasAuthError) {
+        throw "PricingBatch returned auth_error (401/403)."
+    }
+
+    $priceMap = @{}
+    $errorClassMap = @{}
+    foreach ($asin in $Asins) {
+        $priceMap[$asin] = if ($batchResult.PriceMap.ContainsKey($asin)) { $batchResult.PriceMap[$asin] } else { $null }
+        if ($batchResult.ErrorClassMap.ContainsKey($asin)) { $errorClassMap[$asin] = $batchResult.ErrorClassMap[$asin] }
+    }
+
+    $singleFallbackTargets = @()
+    foreach ($asin in $Asins) {
+        $state = if ($batchResult.StateMap.ContainsKey($asin)) { $batchResult.StateMap[$asin] } else { 'retryable' }
+        if ($state -eq 'retryable') {
+            $singleFallbackTargets += $asin
+            continue
+        }
+
+        if ($state -eq 'not_found') {
+            $errorClassMap[$asin] = 'NotFound/Validation'
+            continue
+        }
+
+        if ($state -eq 'auth_error') {
+            throw "Pricing auth_error detected for ASIN=$asin"
+        }
+    }
+
+    if ($singleFallbackTargets.Count -gt 0) {
+        Write-Log -Message "Pricing単発フォールバック件数: $($singleFallbackTargets.Count)" -LogPath $LogPath -Level 'WARN'
+        $singleResult = Get-PriceMapByAsinSequential -Asins $singleFallbackTargets -AccessToken $AccessToken -Config $Config -LogPath $LogPath -AuthContext $AuthContext
+        foreach ($asin in $singleFallbackTargets) {
+            $priceMap[$asin] = $singleResult.PriceMap[$asin]
+            if ($singleResult.ErrorClassMap.ContainsKey($asin)) { $errorClassMap[$asin] = $singleResult.ErrorClassMap[$asin] }
+            else { $errorClassMap.Remove($asin) | Out-Null }
+        }
+    }
+
+    return [PSCustomObject]@{ PriceMap = $priceMap; ErrorClassMap = $errorClassMap }
+}
+
 # Backward-compatibility wrapper
 function Get-PriceMapByAsinBatch {
     param(
@@ -956,7 +1150,7 @@ function Get-PriceMapByAsinBatch {
         [hashtable]$AuthContext
     )
 
-    Get-PriceMapByAsinSequential -Asins $Asins -AccessToken $AccessToken -Config $Config -LogPath $LogPath -AuthContext $AuthContext
+    Get-PriceMapByAsinWithFallback -Asins $Asins -AccessToken $AccessToken -Config $Config -LogPath $LogPath -AuthContext $AuthContext
 }
 
 function Get-FunctionDependencyMap {
@@ -985,8 +1179,11 @@ function Get-FunctionDependencyMap {
         'Get-LowestNewPriceFromOffers' = @()
         'Get-AsinMapByJanBatch' = @('Invoke-SpApiRequest','New-SpApiHeaders','Split-IntoChunks','Get-ErrorDetail','Get-StatusClassification','Get-LwaAccessTokenCached')
         'Get-PriceBySingleAsin' = @('Wait-ForPricingSlot','Invoke-SpApiRequest','New-SpApiHeaders','Get-LowestNewPriceFromOffers','Get-ErrorDetail','Get-LwaAccessTokenCached')
+        'Classify-PricingBatchItem' = @('Get-PropertyValue','Get-StatusClassification','Get-LowestNewPriceFromOffers')
+        'Get-PriceMapByAsinBatchPrimary' = @('Invoke-SpApiRequest','New-SpApiHeaders','Get-ErrorDetail','Get-PropertyValue','Classify-PricingBatchItem','Get-LwaAccessTokenCached')
         'Get-PriceMapByAsinSequential' = @('Get-PriceBySingleAsin','Get-ErrorDetail')
-        'Get-PriceMapByAsinBatch' = @('Get-PriceMapByAsinSequential')
+        'Get-PriceMapByAsinWithFallback' = @('Get-PriceMapByAsinBatchPrimary','Get-PriceMapByAsinSequential','Write-Log')
+        'Get-PriceMapByAsinBatch' = @('Get-PriceMapByAsinWithFallback')
         'Import-PersistentCache' = @('Write-Log')
         'Save-PersistentCache' = @('Write-Log')
         'Add-DailyPriceHistory' = @('Write-Log')
@@ -996,7 +1193,7 @@ function Get-FunctionDependencyMap {
         'Test-CacheFreshByStatus' = @('Get-CacheTtlHoursByStatus','Test-CacheFresh')
         'Test-CacheFresh' = @()
         'Save-SecretsInteractive' = @()
-        'Invoke-AmazonPriceUpdate' = @('Import-PersistentCache','Get-LwaAccessTokenCached','Get-AsinMapByJanBatch','Get-PriceMapByAsinSequential','Save-PersistentCache','Add-DailyPriceHistory','Get-JanCacheKey','Get-OfferCacheKey','Test-CacheFreshByStatus','ConvertTo-PlainText','Initialize-RunStats','Get-ErrorDetail','Write-Log')
+        'Invoke-AmazonPriceUpdate' = @('Import-PersistentCache','Get-LwaAccessTokenCached','Get-AsinMapByJanBatch','Get-PriceMapByAsinWithFallback','Save-PersistentCache','Add-DailyPriceHistory','Get-JanCacheKey','Get-OfferCacheKey','Test-CacheFreshByStatus','ConvertTo-PlainText','Initialize-RunStats','Get-ErrorDetail','Write-Log')
     }
 }
 
@@ -1295,7 +1492,7 @@ function Invoke-AmazonPriceUpdate {
 
             if ($needPriceAsins.Count -gt 0) {
                 $distinctAsins = @($needPriceAsins | Sort-Object -Unique)
-                $pricingResult = Get-PriceMapByAsinSequential -Asins $distinctAsins -AccessToken $accessToken -Config $Config -LogPath $logPath -AuthContext $authContext
+                $pricingResult = Get-PriceMapByAsinWithFallback -Asins $distinctAsins -AccessToken $accessToken -Config $Config -LogPath $logPath -AuthContext $authContext
                 foreach ($k in $pricingResult.PriceMap.Keys) { $priceMap[$k] = $pricingResult.PriceMap[$k] }
                 foreach ($k in $pricingResult.ErrorClassMap.Keys) { $priceErrorMap[$k] = $pricingResult.ErrorClassMap[$k] }
                 $pricingApiCalls = $script:RunStats.PricingCalls
@@ -1449,4 +1646,4 @@ function Invoke-AmazonPriceUpdate {
     }
 }
 
-Export-ModuleMember -Function ConvertTo-PlainText,Write-Log,Get-StatusClassification,Get-ErrorDetail,Invoke-WithRetry,Get-AmzDateHeaderValue,New-SpApiHeaders,Split-IntoChunks,Read-AccessTokenCache,Save-AccessTokenCache,Get-LwaAccessTokenCached,Get-LwaAccessToken,Get-LowestNewPriceFromOffers,Get-PriceBySingleAsin,Get-AsinMapByJanBatch,Get-PriceMapByAsinSequential,Get-PriceMapByAsinBatch,Get-FunctionDependencyMap,Import-PersistentCache,Save-PersistentCache,Add-DailyPriceHistory,Test-CacheFresh,Save-SecretsInteractive,Invoke-AmazonPriceUpdate
+Export-ModuleMember -Function ConvertTo-PlainText,Write-Log,Get-StatusClassification,Get-ErrorDetail,Invoke-WithRetry,Get-AmzDateHeaderValue,New-SpApiHeaders,Split-IntoChunks,Read-AccessTokenCache,Save-AccessTokenCache,Get-LwaAccessTokenCached,Get-LwaAccessToken,Get-LowestNewPriceFromOffers,Get-PriceBySingleAsin,Classify-PricingBatchItem,Get-AsinMapByJanBatch,Get-PriceMapByAsinBatchPrimary,Get-PriceMapByAsinSequential,Get-PriceMapByAsinWithFallback,Get-PriceMapByAsinBatch,Get-FunctionDependencyMap,Import-PersistentCache,Save-PersistentCache,Add-DailyPriceHistory,Test-CacheFresh,Save-SecretsInteractive,Invoke-AmazonPriceUpdate
