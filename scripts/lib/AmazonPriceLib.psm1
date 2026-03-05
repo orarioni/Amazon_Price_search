@@ -315,6 +315,8 @@ function Write-SpApiResponseDebugLog {
         foreach ($item in $batchResponsesArray) {
             $index++
             $status = Get-PropertyValue -Object $item -Name 'status'
+            $statusCodeObj = Get-PropertyValue -Object $status -Name 'statusCode'
+            if ($statusCodeObj) { $status = $statusCodeObj }
             $request = Get-PropertyValue -Object $item -Name 'request'
             $requestUri = Get-PropertyValue -Object $request -Name 'uri'
             $body = Get-PropertyValue -Object $item -Name 'body'
@@ -1116,7 +1118,13 @@ function Get-PriceMapByAsinBatch {
 
         $requests = @()
         foreach ($asin in $chunk) {
-            $requests += @{ uri = "/products/pricing/v0/items/$([Uri]::EscapeDataString($asin))/offers?MarketplaceId=$($Config.MarketplaceId)&ItemCondition=New"; method = 'GET' }
+            $requests += @{
+                Asin          = [string]$asin
+                MarketplaceId = [string]$Config.MarketplaceId
+                ItemCondition = 'New'
+                method        = 'GET'
+                uri           = "/products/pricing/v0/items/$([Uri]::EscapeDataString($asin))/offers"
+            }
         }
 
         $body = @{ requests = $requests } | ConvertTo-Json -Depth 5
@@ -1183,7 +1191,13 @@ function Get-PriceMapByAsinBatch {
 
         $retryableResponseAsins = New-Object System.Collections.Generic.List[string]
         foreach ($response in @($responseItems)) {
-            $statusCode = if ($response.status) { [int]$response.status } else { $null }
+            $statusCode = $null
+            $statusRaw = Get-PropertyValue -Object $response -Name 'status'
+            if ($statusRaw) {
+                $statusCodeRaw = Get-PropertyValue -Object $statusRaw -Name 'statusCode'
+                if ($statusCodeRaw) { $statusCode = [int]$statusCodeRaw }
+                elseif ($statusRaw -as [int]) { $statusCode = [int]$statusRaw }
+            }
 
             $asin = $null
             if ($response.body -and $response.body.payload -and $response.body.payload.ASIN) {
@@ -1193,6 +1207,9 @@ function Get-PriceMapByAsinBatch {
                 if ($response.request.uri -match '/items/([^/]+)/offers') {
                     $asin = [Uri]::UnescapeDataString($matches[1])
                 }
+            }
+            elseif ($response.request -and $response.request.Asin) {
+                $asin = [string]$response.request.Asin
             }
 
             if (-not $asin -or -not $priceMap.ContainsKey($asin)) { continue }
