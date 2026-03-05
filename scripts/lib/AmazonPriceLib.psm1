@@ -913,14 +913,18 @@ function Get-PriceBySingleAsin {
         throw "ASIN=$Asin の単発価格取得結果が空です。"
     }
 
-    $statusCode = if ($res.status) { [int]$res.status } else { $null }
+    $statusRaw = Get-PropertyValue -Object $res -Name 'status'
+    $statusCode = $null
+    if ($null -ne $statusRaw -and "$statusRaw" -ne '') { $statusCode = [int]$statusRaw }
     if ($statusCode -and $statusCode -ge 400) {
         $bodyText = $res | ConvertTo-Json -Depth 8
         $detail = Get-StatusClassification -StatusCode $statusCode -BodyText $bodyText
         return [PSCustomObject]@{ Price = $null; ErrorClass = $detail.Class }
     }
 
-    $offers = if ($res.payload -and $res.payload.Offers) { $res.payload.Offers } else { $res.Offers }
+    $payload = Get-PropertyValue -Object $res -Name 'payload'
+    $payloadOffers = Get-PropertyValue -Object $payload -Name 'Offers'
+    $offers = if ($payloadOffers) { $payloadOffers } else { Get-PropertyValue -Object $res -Name 'Offers' }
     $price = Get-LowestNewPriceFromOffers -Offers $offers
     if ($null -eq $price) {
         return [PSCustomObject]@{ Price = $null; ErrorClass = 'NotFound/Validation' }
