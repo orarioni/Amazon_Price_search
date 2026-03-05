@@ -189,7 +189,7 @@ function Expand-CatalogItems {
     if ($null -eq $Items) { return @() }
 
     $arr = ConvertTo-ObjectArray -Value $Items
-    if ($arr.Count -eq 1) {
+    if (@($arr).Count -eq 1) {
         $single = $arr[0]
         $singleAsin = Get-PropertyValue -Object $single -Name 'asin'
         if (-not $singleAsin) {
@@ -209,7 +209,7 @@ function Expand-CatalogItems {
                 foreach ($name in $propertyNames | Sort-Object {[int]$_}) {
                     $values += $single.PSObject.Properties[$name].Value
                 }
-                if ($values.Count -gt 0) {
+                if (@($values).Count -gt 0) {
                     return @($values)
                 }
             }
@@ -989,7 +989,7 @@ function Get-AsinMapByJanBatch {
         if ($unresolvedJans.Count -eq $chunk.Count) {
             $sampleText = Get-CatalogIdentifierSampleText -Items $catalogItems
             $numberOfResults = Get-PropertyValue -Object $res -Name 'numberOfResults'
-            $expandedCount = (Expand-CatalogItems -Items $catalogItems).Count
+            $expandedCount = @(Expand-CatalogItems -Items $catalogItems).Count
             Write-Log -Message "Catalog parse diagnostic: all unresolved in chunk (index=$index,size=$($chunk.Count), response.items.type=$(Get-ObjectTypeName -Value $catalogItems), expanded.items.count=$expandedCount, numberOfResults=$numberOfResults, response.props=$((@($res.PSObject.Properties.Name) -join ',')), sample.identifiers=$sampleText)" -LogPath $LogPath -Level 'WARN'
         }
         Write-Log -Message "EANフォールバックは無効化されています: unresolved=$($unresolvedJans.Count)件 (index=$index)" -LogPath $LogPath
