@@ -894,13 +894,13 @@ function Get-AsinMapByJanBatch {
                 $identifierGroups = ConvertTo-ObjectArray -Value $itemIdentifiers
             }
 
-            if ($identifierGroups.Count -eq 0) {
+            if (@($identifierGroups).Count -eq 0) {
                 Write-Log -Message "Catalog identifier parse: empty identifierGroups (item.identifiers.type=$(Get-ObjectTypeName -Value $itemIdentifiers), nested.type=$(Get-ObjectTypeName -Value $nestedGroups))" -LogPath $LogPath -Level 'WARN'
                 continue
             }
 
             $matchedIdentifier = $null
-            foreach ($idGroup in $identifierGroups) {
+            foreach ($idGroup in @($identifierGroups)) {
                 # identifiers 配下に identifiers 配列がネストされるケースと、
                 # 直接 identifierType/identifier を持つケースの両方に対応する。
                 $leafIdentifiers = @()
@@ -912,7 +912,7 @@ function Get-AsinMapByJanBatch {
                     $leafIdentifiers = ConvertTo-ObjectArray -Value $idGroup
                 }
 
-                foreach ($leaf in $leafIdentifiers) {
+                foreach ($leaf in @($leafIdentifiers)) {
                     $identifierType = [string](Get-PropertyValue -Object $leaf -Name 'identifierType')
                     $identifierValue = [string](Get-PropertyValue -Object $leaf -Name 'identifier')
                     if ([string]::IsNullOrWhiteSpace($identifierValue)) {
