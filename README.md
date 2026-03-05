@@ -166,6 +166,7 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 
 **対処**:
 - JANの桁・値を再確認
+- 本ツールは Catalog API で **JAN検索→未解決分のみEANフォールバック検索** を実施済み（`identifiersType=JAN` 後に `identifiersType=EAN`）
 - 必要に応じて Amazon 側で商品存在を確認
 - `logs/run.log` の該当JANの分類ログを確認
 
