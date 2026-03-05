@@ -76,6 +76,33 @@ function Get-PropertyValue {
     return $property.Value
 }
 
+function Get-StatusCodeValue {
+    param([object]$Status)
+
+    if ($null -eq $Status) { return $null }
+
+    $direct = $Status -as [int]
+    if ($null -ne $direct) { return $direct }
+
+    $statusCode = Get-PropertyValue -Object $Status -Name 'statusCode'
+    if ($null -eq $statusCode) {
+        $statusCode = Get-PropertyValue -Object $Status -Name 'StatusCode'
+    }
+    $fromProp = $statusCode -as [int]
+    if ($null -ne $fromProp) { return $fromProp }
+
+    if ($Status -is [System.Collections.IDictionary]) {
+        foreach ($k in @('statusCode', 'StatusCode')) {
+            if ($Status.Contains($k)) {
+                $fromDict = $Status[$k] -as [int]
+                if ($null -ne $fromDict) { return $fromDict }
+            }
+        }
+    }
+
+    return $null
+}
+
 
 function ConvertTo-ObjectArray {
     param([object]$Value)
@@ -314,9 +341,9 @@ function Write-SpApiResponseDebugLog {
         $batchResponsesArray = @($batchResponses)
         foreach ($item in $batchResponsesArray) {
             $index++
-            $status = Get-PropertyValue -Object $item -Name 'status'
-            $statusCodeObj = Get-PropertyValue -Object $status -Name 'statusCode'
-            if ($statusCodeObj) { $status = $statusCodeObj }
+            $statusRaw = Get-PropertyValue -Object $item -Name 'status'
+            $statusCode = Get-StatusCodeValue -Status $statusRaw
+            $status = if ($null -ne $statusCode) { $statusCode } else { $statusRaw }
             $request = Get-PropertyValue -Object $item -Name 'request'
             $requestUri = Get-PropertyValue -Object $request -Name 'uri'
             $body = Get-PropertyValue -Object $item -Name 'body'
@@ -328,11 +355,13 @@ function Write-SpApiResponseDebugLog {
             $errorCount = if ($errors) { @($errors).Count } else { 0 }
 
             Write-Log -Message "$Endpoint debug[$index/$($batchResponsesArray.Count)]: status=$status request.uri=$requestUri payload.ASIN=$asin offers.count=$offersCount errors.count=$errorCount" -LogPath $LogPath
-            if (($status -as [int]) -ge 400 -or $errorCount -gt 0) { $shouldLogFull = $true }
+            if ((($statusCode -as [int]) -ge 400) -or $errorCount -gt 0) { $shouldLogFull = $true }
         }
     }
     else {
-        $status = Get-PropertyValue -Object $Response -Name 'status'
+        $statusRaw = Get-PropertyValue -Object $Response -Name 'status'
+        $statusCode = Get-StatusCodeValue -Status $statusRaw
+        $status = if ($null -ne $statusCode) { $statusCode } else { $statusRaw }
         $payload = Get-PropertyValue -Object $Response -Name 'payload'
         $errors = Get-PropertyValue -Object $Response -Name 'errors'
         $requestUri = Get-PropertyValue -Object $Response -Name 'uri'
@@ -342,7 +371,7 @@ function Write-SpApiResponseDebugLog {
         $errorCount = if ($errors) { @($errors).Count } else { 0 }
 
         Write-Log -Message "$Endpoint debug: status=$status request.uri=$requestUri payload.ASIN=$asin offers.count=$offersCount errors.count=$errorCount" -LogPath $LogPath
-        if (($status -as [int]) -ge 400 -or $errorCount -gt 0) { $shouldLogFull = $true }
+        if ((($statusCode -as [int]) -ge 400) -or $errorCount -gt 0) { $shouldLogFull = $true }
     }
 
     if (-not $shouldLogFull) {
@@ -462,7 +491,8 @@ function Invoke-SpApiRequest {
         }
         catch {
             $detail = Get-ErrorDetail -ErrorRecord $_
-            $status = if ($detail.StatusCode) { [int]$detail.StatusCode } else { 0 }
+            $status = Get-StatusCodeValue -Status $detail.StatusCode
+            if ($null -eq $status) { $status = 0 }
             if ($status -eq 0) {
                 # log the raw exception for troubleshooting
                 Write-Log -Message "Invoke-SpApiRequest exception: $($_.Exception.GetType().FullName) - $($_.Exception.Message)" -LogPath $LogPath -Level 'WARN'
@@ -1065,7 +1095,7 @@ function Get-PriceBySingleAsin {
         throw "ASIN=$Asin の単発価格取得結果が空です。"
     }
 
-    $statusCode = if ($res.status) { [int]$res.status } else { $null }
+    $statusCode = Get-StatusCodeValue -Status (Get-PropertyValue -Object $res -Name 'status')
     if ($statusCode -and $statusCode -ge 400) {
         $bodyText = $res | ConvertTo-Json -Depth 8
         $detail = Classify-StatusAndBody -StatusCode $statusCode -BodyText $bodyText
@@ -1123,17 +1153,34 @@ function Get-PriceMapByAsinBatch {
         foreach ($asin in $chunk) { $priceMap[$asin] = $null }
 
         $requests = @()
+        $skippedBlankAsin = 0
         foreach ($asin in $chunk) {
+            if ([string]::IsNullOrWhiteSpace([string]$asin)) {
+                $skippedBlankAsin++
+                continue
+            }
+
+            $normalizedAsin = ([string]$asin).Trim()
             $requests += @{
-                Asin          = [string]$asin
+                Asin          = $normalizedAsin
                 MarketplaceId = [string]$Config.MarketplaceId
                 ItemCondition = 'New'
                 method        = 'GET'
-                uri           = "/products/pricing/v0/items/$([Uri]::EscapeDataString($asin))/offers"
+                uri           = "/products/pricing/v0/items/$([Uri]::EscapeDataString($normalizedAsin))/offers"
             }
         }
 
-        $body = @{ requests = $requests } | ConvertTo-Json -Depth 5
+        if ($skippedBlankAsin -gt 0) {
+            Write-Log -Message "Pricing: skip blank ASIN count=$skippedBlankAsin (index=$index,size=$batchSize)" -LogPath $LogPath -Level 'WARN'
+        }
+
+        if (@($requests).Count -eq 0) {
+            foreach ($asin in $chunk) { $errorClassMap[$asin] = 'NotFound/Validation' }
+            $index = $end + 1
+            continue
+        }
+
+        $body = @{ requests = $requests } | ConvertTo-Json -Depth 10 -Compress
 
         $res = $null
         $attemptDetail = $null
@@ -1197,13 +1244,8 @@ function Get-PriceMapByAsinBatch {
 
         $retryableResponseAsins = New-Object System.Collections.Generic.List[string]
         foreach ($response in @($responseItems)) {
-            $statusCode = $null
             $statusRaw = Get-PropertyValue -Object $response -Name 'status'
-            if ($statusRaw) {
-                $statusCodeRaw = Get-PropertyValue -Object $statusRaw -Name 'statusCode'
-                if ($statusCodeRaw) { $statusCode = [int]$statusCodeRaw }
-                elseif ($statusRaw -as [int]) { $statusCode = [int]$statusRaw }
-            }
+            $statusCode = Get-StatusCodeValue -Status $statusRaw
 
             $asin = $null
             if ($response.body -and $response.body.payload -and $response.body.payload.ASIN) {
