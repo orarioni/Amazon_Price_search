@@ -139,8 +139,8 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 - negative cache TTL: 12時間（`NegativeCacheTtlHours`）
 - not_found 再照会TTL: 24時間（`NotFoundRecheckHours`、未設定時は `NegativeCacheTtlHours` を使用）
 - not_found 強制再照会: `ForceRecheckNotFound=$true` で not_found キャッシュを無視して毎回再照会
-- SP-API応答デバッグ: `DebugSpApiResponse=$true` で要点ログ（`status / errors / request.uri / payload.ASIN / Offers.Count`）をターミナルとログへ出力
-- 応答全文の出力上限: `DebugSpApiResponseMaxChars`（既定 4000 文字、機微情報はマスク）
+- SP-API応答デバッグ: `DebugSpApiResponse=$true` で要点ログ + 応答全文（マスク済み）をターミナルとログへ出力
+- 応答全文の出力上限: `DebugSpApiResponseMaxChars`（既定 0 = 無制限、機微情報はマスク。正の値を指定するとその文字数で切り詰め）
 - `ok` / `not_found` はキャッシュ保持
 - `transient_error` は永続化しない（次回再取得）
 

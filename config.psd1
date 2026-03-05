@@ -10,7 +10,7 @@
     PricingMinIntervalSec = 2.2
     PricingBatchSize = 20
     DebugSpApiResponse = $true
-    DebugSpApiResponseMaxChars = 4000
+    DebugSpApiResponseMaxChars = 0
     JanAsinCacheTtlHours = 168
     OfferCacheTtlHours   = 24
     NegativeCacheTtlHours = 12

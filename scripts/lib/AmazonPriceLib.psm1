@@ -120,10 +120,8 @@ function Write-SpApiResponseDebugLog {
         return
     }
 
-    $maxChars = if ($Config.DebugSpApiResponseMaxChars) { [int]$Config.DebugSpApiResponseMaxChars } else { 4000 }
-    $maxChars = [Math]::Max(200, $maxChars)
+    $maxChars = if ($null -ne $Config.DebugSpApiResponseMaxChars) { [int]$Config.DebugSpApiResponseMaxChars } else { 0 }
 
-    $shouldLogFull = $false
 
     $responses = Get-PropertyValue -Object $Response -Name 'responses'
     if ($responses) {
@@ -144,7 +142,6 @@ function Write-SpApiResponseDebugLog {
             $errorCount = if ($errors) { @($errors).Count } else { 0 }
 
             Write-Log -Message "$Endpoint debug[$index/$responseCount]: status=$status request.uri=$requestUri payload.ASIN=$asin offers.count=$offersCount errors.count=$errorCount" -LogPath $LogPath
-            if (($status -as [int]) -ge 400 -or $errorCount -gt 0) { $shouldLogFull = $true }
         }
     }
     else {
@@ -158,22 +155,17 @@ function Write-SpApiResponseDebugLog {
         $errorCount = if ($errors) { @($errors).Count } else { 0 }
 
         Write-Log -Message "$Endpoint debug: status=$status request.uri=$requestUri payload.ASIN=$asin offers.count=$offersCount errors.count=$errorCount" -LogPath $LogPath
-        if (($status -as [int]) -ge 400 -or $errorCount -gt 0) { $shouldLogFull = $true }
-    }
-
-    if (-not $shouldLogFull) {
-        return
     }
 
     $responseJson = Mask-SensitiveText -Text (($Response | ConvertTo-Json -Depth 20 -Compress) 2>$null)
     if (-not [string]::IsNullOrWhiteSpace($responseJson)) {
-        $snippet = if ($responseJson.Length -gt $maxChars) {
-            "$($responseJson.Substring(0, $maxChars))...(truncated)"
+        $snippet = $responseJson
+        if ($maxChars -gt 0 -and $responseJson.Length -gt $maxChars) {
+            $snippet = "$($responseJson.Substring(0, $maxChars))...(truncated)"
         }
-        else {
-            $responseJson
-        }
-        Write-Log -Message "$Endpoint debug.full(max=$maxChars): $snippet" -LogPath $LogPath
+
+        $label = if ($maxChars -gt 0) { "$Endpoint debug.full(max=$maxChars)" } else { "$Endpoint debug.full(max=unlimited)" }
+        Write-Log -Message "$label: $snippet" -LogPath $LogPath
     }
 }
 
