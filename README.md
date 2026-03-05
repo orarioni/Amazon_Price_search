@@ -217,6 +217,13 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 
 ---
 
+## 関数依存関係ドキュメント
+
+- 全関数の依存関係は `docs/FUNCTION_DEPENDENCIES.md` に整理しています。
+- 依存関係の棚卸し・影響範囲確認時はこのドキュメントを参照してください。
+
+---
+
 ## ディレクトリ構成（主要）
 
 - `run_init.bat` : 初期認証情報登録の起動
