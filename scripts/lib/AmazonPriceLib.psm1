@@ -183,6 +183,20 @@ function Get-CatalogIdentifierSampleText {
     return ($samples -join ';')
 }
 
+function Get-CatalogItemPropertySample {
+    param([object]$Items)
+
+    if (-not $Items) { return '<no-items>' }
+
+    $first = (Expand-CatalogItems -Items $Items | Select-Object -First 1)
+    if (-not $first) { return '<no-expanded-items>' }
+
+    $props = @($first.PSObject.Properties.Name)
+    if (@($props).Count -eq 0) { return '<no-properties>' }
+
+    return ($props -join ',')
+}
+
 function Expand-CatalogItems {
     param([object]$Items)
 
@@ -943,7 +957,7 @@ function Get-AsinMapByJanBatch {
         }
 
         $identifiers = ($chunk | ForEach-Object { $_.Trim() }) -join ','
-        $uri = "$($Config.SpApiBaseUrl)/catalog/2022-04-01/items?identifiers=$([Uri]::EscapeDataString($identifiers))&identifiersType=JAN&marketplaceIds=$($Config.MarketplaceId)"
+        $uri = "$($Config.SpApiBaseUrl)/catalog/2022-04-01/items?identifiers=$([Uri]::EscapeDataString($identifiers))&identifiersType=JAN&marketplaceIds=$($Config.MarketplaceId)&includedData=identifiers"
         Write-Log -Message "JAN検索: $($chunk.Count)件 (index=$index,size=$batchSize)" -LogPath $LogPath
 
         $res = $null
@@ -985,6 +999,10 @@ function Get-AsinMapByJanBatch {
         $unresolvedJans = @($chunk | Where-Object { -not $resultMap[$_] })
         if ($chunkParseStats.Count -gt 0) {
             Write-Log -Message "Catalog parse stats: index=$index size=$($chunk.Count) expanded=$($chunkParseStats.ExpandedItems) withoutIdentifiers=$($chunkParseStats.ItemsWithoutIdentifiers) identifierCandidates=$($chunkParseStats.IdentifierCandidates) matchedIdentifiers=$($chunkParseStats.MatchedIdentifiers) itemsWithAsin=$($chunkParseStats.ItemsWithAsin) unresolved=$($unresolvedJans.Count)" -LogPath $LogPath
+            if (($chunkParseStats.ExpandedItems -gt 0) -and ($chunkParseStats.ItemsWithoutIdentifiers -eq $chunkParseStats.ExpandedItems)) {
+                $propertySample = Get-CatalogItemPropertySample -Items $catalogItems
+                Write-Log -Message "Catalog parse diagnostic: expanded items have no identifiers (index=$index, item.props=$propertySample)" -LogPath $LogPath -Level 'WARN'
+            }
         }
         if ($unresolvedJans.Count -eq $chunk.Count) {
             $sampleText = Get-CatalogIdentifierSampleText -Items $catalogItems
