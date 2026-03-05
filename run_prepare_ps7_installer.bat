@@ -14,5 +14,10 @@ if errorlevel 1 (
 
 echo.
 echo [OK] PS7 インストーラーのダウンロードが完了しました。
-echo [NEXT] MSI を手動実行するか run_install_ps7.bat を実行してください。
+echo [NEXT] インストールを開始します。
+call "%~dp0run_install_ps7.bat"
+if errorlevel 1 (
+  exit /b 1
+)
+
 exit /b 0

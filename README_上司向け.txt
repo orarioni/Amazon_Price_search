@@ -2,11 +2,10 @@
 
 ■ 初回だけ実施
 1) Excelを閉じる
-2) run_prepare_ps7_installer.bat を実行（MSI をダウンロード）
-3) run_install_ps7.bat を実行（または installers フォルダの MSI を手動実行）
-4) ターミナルを開き直し、pwsh -v で確認
-5) run_init.bat をダブルクリック
-6) client_id / client_secret / refresh_token を入力して保存完了メッセージを確認
+2) run_prepare_ps7_installer.bat を実行（MSI のダウンロードとインストールを実施）
+3) ターミナルを開き直し、pwsh -v で確認
+4) run_init.bat をダブルクリック
+5) client_id / client_secret / refresh_token を入力して保存完了メッセージを確認
 
 ■ 毎回の更新手順
 1) data\input.xlsx を更新（JANコードは B列、1行目は見出し）

@@ -24,7 +24,7 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 - **OS**: Windows 11（Windows 10 でも概ね動作想定）
 - **Excel**: Microsoft Excel（COM 自動化を利用）
 - **PowerShell**: **PowerShell 7 (pwsh) 必須**（本リポジトリの `.bat` は pwsh 前提）
-  - 上司PC向けインストーラーは `run_prepare_ps7_installer.bat` で取得可能（`installers/` に保存）
+  - 上司PC向けインストーラーは `run_prepare_ps7_installer.bat` 1本で ダウンロード〜インストールまで実行可能
 - **ネットワーク**: Amazon API へ HTTPS 接続できること
 - **認証情報**: Amazon SP-API 用の以下3点
   - `client_id`
@@ -38,15 +38,14 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 ## 初回セットアップ（1回だけ）
 
 1. Excel をすべて閉じる
-2. （未導入PCのみ）`run_prepare_ps7_installer.bat` で MSI をダウンロード
-3. `run_install_ps7.bat` を実行（または `installers/` の MSI を手動実行）
-4. ターミナルを開き直し、`pwsh -v` で確認
-5. リポジトリ直下で `run_init.bat` を実行（ダブルクリック可）
-6. プロンプトに従って以下を入力
+2. （未導入PCのみ）`run_prepare_ps7_installer.bat` を実行（MSI ダウンロード + インストール）
+3. ターミナルを開き直し、`pwsh -v` で確認
+4. リポジトリ直下で `run_init.bat` を実行（ダブルクリック可）
+5. プロンプトに従って以下を入力
    - `client_id`
    - `client_secret`
    - `refresh_token`
-7. `secrets/lwa_secrets.xml` 作成メッセージを確認
+6. `secrets/lwa_secrets.xml` 作成メッセージを確認
 
 `run_init.bat` は内部で `scripts/00_init_secrets.ps1` を呼び出し、認証情報を保存します。
 
@@ -203,8 +202,7 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 
 ## ディレクトリ構成（主要）
 
-- `run_prepare_ps7_installer.bat` : 上司PC向け PowerShell 7 インストーラー取得（ダウンロード）
-- `run_install_ps7.bat` : ダウンロード済み MSI から PowerShell 7 をインストール
+- `run_prepare_ps7_installer.bat` : 上司PC向け PowerShell 7 インストーラー取得 + インストール
 - `run_init.bat` : 初期認証情報登録の起動（pwsh 実行）
 - `run_update.bat` : 更新処理の起動（pwsh 実行）
 - `config.psd1` : 環境設定（マーケットプレイス、TTL、各パス等）
