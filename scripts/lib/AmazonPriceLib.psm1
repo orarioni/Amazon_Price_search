@@ -558,6 +558,70 @@ function Get-AsinMapByJanBatch {
     $batchSize = [Math]::Max($minBatchSize, [int]$Config.CatalogBatchSize)
     $index = 0
 
+    $applyCatalogItems = {
+        param(
+            [object]$Items,
+            [hashtable]$TargetMap,
+            [hashtable]$TargetErrorClassMap
+        )
+
+        if (-not $Items) { return }
+
+        foreach ($item in $Items) {
+            $itemIdentifiers = Get-PropertyValue -Object $item -Name 'identifiers'
+            if (-not $itemIdentifiers) { continue }
+
+            $identifierGroups = @()
+            # Catalog Items API の identifiers は配列で返る実装があるため、
+            # 直接配列として扱える場合はそのまま利用する。
+            if ($itemIdentifiers -is [System.Collections.IEnumerable] -and -not ($itemIdentifiers -is [string])) {
+                $identifierGroups = @($itemIdentifiers)
+            }
+            else {
+                $nestedGroups = Get-PropertyValue -Object $itemIdentifiers -Name 'identifiers'
+                if ($nestedGroups) {
+                    $identifierGroups = @($nestedGroups)
+                }
+            }
+            if ($identifierGroups.Count -eq 0) { continue }
+
+            $matchedIdentifier = $null
+            foreach ($idGroup in $identifierGroups) {
+                # identifiers 配下に identifiers 配列がネストされるケースと、
+                # 直接 identifierType/identifier を持つケースの両方に対応する。
+                $leafIdentifiers = @()
+                $nestedLeafIdentifiers = Get-PropertyValue -Object $idGroup -Name 'identifiers'
+                if ($nestedLeafIdentifiers) {
+                    $leafIdentifiers = @($nestedLeafIdentifiers)
+                }
+                else {
+                    $leafIdentifiers = @($idGroup)
+                }
+
+                foreach ($leaf in $leafIdentifiers) {
+                    $identifierType = [string](Get-PropertyValue -Object $leaf -Name 'identifierType')
+                    $identifierValue = [string](Get-PropertyValue -Object $leaf -Name 'identifier')
+                    if (($identifierType -in @('JAN', 'EAN')) -and -not [string]::IsNullOrWhiteSpace($identifierValue)) {
+                        $normalizedIdentifier = $identifierValue.Trim()
+                        if ($TargetMap.ContainsKey($normalizedIdentifier)) {
+                            $matchedIdentifier = $normalizedIdentifier
+                            break
+                        }
+                    }
+                }
+                if ($matchedIdentifier) { break }
+            }
+
+            $asin = [string](Get-PropertyValue -Object $item -Name 'asin')
+            if ($matchedIdentifier -and -not [string]::IsNullOrWhiteSpace($asin)) {
+                $TargetMap[$matchedIdentifier] = $asin
+                $TargetErrorClassMap.Remove($matchedIdentifier) | Out-Null
+            }
+        }
+
+        return
+    }
+
     while ($index -lt $Jans.Count) {
         $end = [Math]::Min($index + $batchSize - 1, $Jans.Count - 1)
         $chunk = @($Jans[$index..$end])
@@ -565,6 +629,7 @@ function Get-AsinMapByJanBatch {
 
         $identifiers = ($chunk | ForEach-Object { $_.Trim() }) -join ','
         $uri = "$($Config.SpApiBaseUrl)/catalog/2022-04-01/items?identifiers=$([Uri]::EscapeDataString($identifiers))&identifiersType=JAN&marketplaceIds=$($Config.MarketplaceId)"
+        Write-Log -Message "JAN検索: $($chunk.Count)件 (index=$index,size=$batchSize)" -LogPath $LogPath
 
         $res = $null
         $attemptDetail = $null
@@ -599,56 +664,38 @@ function Get-AsinMapByJanBatch {
             continue
         }
 
-        if ($res.items) {
-            foreach ($item in $res.items) {
-                $itemIdentifiers = Get-PropertyValue -Object $item -Name 'identifiers'
-                if (-not $itemIdentifiers) { continue }
+        & $applyCatalogItems -Items $res.items -TargetMap $resultMap -TargetErrorClassMap $errorClassMap | Out-Null
 
-                $identifierGroups = @()
-                # Catalog Items API の res.items.identifiers は「直接配列」または
-                # 「identifiers 配下にネストされた配列」の両形式で返る前提で処理する。
-                if ($itemIdentifiers -is [System.Collections.IEnumerable] -and -not ($itemIdentifiers -is [string])) {
-                    $identifierGroups = @($itemIdentifiers)
+        $unresolvedJans = @($chunk | Where-Object { -not $resultMap[$_] })
+        Write-Log -Message "EANフォールバック件数: $($unresolvedJans.Count)件 (index=$index)" -LogPath $LogPath
+        if ($unresolvedJans.Count -gt 0) {
+            $eanIdentifiers = ($unresolvedJans | ForEach-Object { $_.Trim() }) -join ','
+            $eanUri = "$($Config.SpApiBaseUrl)/catalog/2022-04-01/items?identifiers=$([Uri]::EscapeDataString($eanIdentifiers))&identifiersType=EAN&marketplaceIds=$($Config.MarketplaceId)"
+
+            $eanRes = $null
+            $eanAttemptDetail = $null
+            try {
+                $eanRes = Invoke-SpApiRequest -Endpoint "CatalogBatchEanFallback(index=$index,size=$($unresolvedJans.Count))" -Method 'Get' -Uri $eanUri -Headers (New-SpApiHeaders -AccessToken $AccessToken -Config $Config) -Config $Config -LogPath $LogPath
+            }
+            catch {
+                $eanAttemptDetail = Get-ErrorDetail -ErrorRecord $_
+                if ($eanAttemptDetail.Class -eq 'Auth' -and $AuthContext) {
+                    try {
+                        $AccessToken = Get-LwaAccessTokenCached -ClientId $AuthContext.ClientId -ClientSecret $AuthContext.ClientSecret -RefreshToken $AuthContext.RefreshToken -Config $Config -LogPath $LogPath -TokenCachePath $AuthContext.TokenCachePath -ForceRefresh
+                        $eanRes = Invoke-SpApiRequest -Endpoint "CatalogBatchEanFallbackAuthRetry(index=$index,size=$($unresolvedJans.Count))" -Method 'Get' -Uri $eanUri -Headers (New-SpApiHeaders -AccessToken $AccessToken -Config $Config) -Config $Config -LogPath $LogPath
+                    }
+                    catch {
+                        $eanAttemptDetail = Get-ErrorDetail -ErrorRecord $_
+                    }
                 }
-                else {
-                    $nestedGroups = Get-PropertyValue -Object $itemIdentifiers -Name 'identifiers'
-                    if ($nestedGroups) {
-                        $identifierGroups = @($nestedGroups)
-                    }
-                }
-                if ($identifierGroups.Count -eq 0) { continue }
+            }
 
-                $matchedJan = $null
-                foreach ($idGroup in $identifierGroups) {
-                    # identifiers 配下に identifiers 配列がネストされるケースと、
-                    # 直接 identifierType/identifier を持つケースの両方に対応する。
-                    $leafIdentifiers = @()
-                    $nestedLeafIdentifiers = Get-PropertyValue -Object $idGroup -Name 'identifiers'
-                    if ($nestedLeafIdentifiers) {
-                        $leafIdentifiers = @($nestedLeafIdentifiers)
-                    }
-                    else {
-                        $leafIdentifiers = @($idGroup)
-                    }
-
-                    foreach ($leaf in $leafIdentifiers) {
-                        $identifierType = Get-PropertyValue -Object $leaf -Name 'identifierType'
-                        $identifierValue = Get-PropertyValue -Object $leaf -Name 'identifier'
-                        if (($identifierType -in @('JAN','EAN')) -and -not [string]::IsNullOrWhiteSpace([string]$identifierValue)) {
-                            $matchedJan = ([string]$identifierValue).Trim()
-                            break
-                        }
-                    }
-                    if ($matchedJan) { break }
-                }
-
-                $asin = Get-PropertyValue -Object $item -Name 'asin'
-                if ($matchedJan -and $asin) {
-                    $lookupJan = $matchedJan.Trim()
-                    if ($resultMap.ContainsKey($lookupJan)) {
-                        $resultMap[$lookupJan] = [string]$asin
-                        $errorClassMap.Remove($lookupJan) | Out-Null
-                    }
+            if ($eanRes) {
+                & $applyCatalogItems -Items $eanRes.items -TargetMap $resultMap -TargetErrorClassMap $errorClassMap | Out-Null
+            }
+            elseif ($eanAttemptDetail) {
+                foreach ($jan in $unresolvedJans) {
+                    $errorClassMap[$jan] = $eanAttemptDetail.Class
                 }
             }
         }
