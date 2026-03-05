@@ -76,6 +76,101 @@ function Get-PropertyValue {
     return $property.Value
 }
 
+function Mask-SensitiveText {
+    param([string]$Text)
+
+    if ([string]::IsNullOrEmpty($Text)) {
+        return $Text
+    }
+
+    $masked = $Text
+    $patterns = @(
+        '(?i)(x-amz-access-token\s*[=:]\s*)([^\s"'',;]+)',
+        '(?i)(Authorization\s*[=:]\s*Bearer\s+)([^\s"'',;]+)',
+        '(?i)("x-amz-access-token"\s*:\s*")(.*?)(")',
+        '(?i)("Authorization"\s*:\s*")(.*?)(")'
+    )
+
+    foreach ($pattern in $patterns) {
+        $masked = [regex]::Replace($masked, $pattern, {
+            param($m)
+            if ($m.Groups.Count -ge 4) {
+                return "$($m.Groups[1].Value)***MASKED***$($m.Groups[3].Value)"
+            }
+
+            return "$($m.Groups[1].Value)***MASKED***"
+        })
+    }
+
+    return $masked
+}
+
+function Write-SpApiResponseDebugLog {
+    param(
+        [string]$Endpoint,
+        [object]$Response,
+        [hashtable]$Config,
+        [string]$LogPath
+    )
+
+    if (-not $Config.DebugSpApiResponse) {
+        return
+    }
+
+    $maxChars = if ($Config.DebugSpApiResponseMaxChars) { [int]$Config.DebugSpApiResponseMaxChars } else { 4000 }
+    $maxChars = [Math]::Max(200, $maxChars)
+
+    $shouldLogFull = $false
+
+    if ($Response -and $Response.responses) {
+        $index = 0
+        foreach ($item in $Response.responses) {
+            $index++
+            $status = Get-PropertyValue -Object $item -Name 'status'
+            $request = Get-PropertyValue -Object $item -Name 'request'
+            $requestUri = Get-PropertyValue -Object $request -Name 'uri'
+            $body = Get-PropertyValue -Object $item -Name 'body'
+            $errors = Get-PropertyValue -Object $body -Name 'errors'
+            $payload = Get-PropertyValue -Object $body -Name 'payload'
+            $asin = Get-PropertyValue -Object $payload -Name 'ASIN'
+            $offers = Get-PropertyValue -Object $payload -Name 'Offers'
+            $offersCount = if ($offers) { @($offers).Count } else { 0 }
+            $errorCount = if ($errors) { @($errors).Count } else { 0 }
+
+            Write-Log -Message "$Endpoint debug[$index/$($Response.responses.Count)]: status=$status request.uri=$requestUri payload.ASIN=$asin offers.count=$offersCount errors.count=$errorCount" -LogPath $LogPath
+            if (($status -as [int]) -ge 400 -or $errorCount -gt 0) { $shouldLogFull = $true }
+        }
+    }
+    else {
+        $status = Get-PropertyValue -Object $Response -Name 'status'
+        $payload = Get-PropertyValue -Object $Response -Name 'payload'
+        $errors = Get-PropertyValue -Object $Response -Name 'errors'
+        $requestUri = Get-PropertyValue -Object $Response -Name 'uri'
+        $asin = Get-PropertyValue -Object $payload -Name 'ASIN'
+        $offers = Get-PropertyValue -Object $payload -Name 'Offers'
+        $offersCount = if ($offers) { @($offers).Count } else { 0 }
+        $errorCount = if ($errors) { @($errors).Count } else { 0 }
+
+        Write-Log -Message "$Endpoint debug: status=$status request.uri=$requestUri payload.ASIN=$asin offers.count=$offersCount errors.count=$errorCount" -LogPath $LogPath
+        if (($status -as [int]) -ge 400 -or $errorCount -gt 0) { $shouldLogFull = $true }
+    }
+
+    if (-not $shouldLogFull) {
+        return
+    }
+
+    $responseJson = Mask-SensitiveText -Text (($Response | ConvertTo-Json -Depth 20 -Compress) 2>$null)
+    if (-not [string]::IsNullOrWhiteSpace($responseJson)) {
+        $snippet = if ($responseJson.Length -gt $maxChars) {
+            "$($responseJson.Substring(0, $maxChars))...(truncated)"
+        }
+        else {
+            $responseJson
+        }
+        Write-Log -Message "$Endpoint debug.full(max=$maxChars): $snippet" -LogPath $LogPath
+    }
+}
+
 function Wait-ForPricingSlot {
     param([hashtable]$Config)
     if (-not $script:RunStats) { return }
@@ -163,6 +258,7 @@ function Invoke-SpApiRequest {
             if ($Endpoint -match '^Pricing') {
                 Update-PricingThrottleFromLimit -RateLimitLimit $limit -Config $Config
             }
+            Write-SpApiResponseDebugLog -Endpoint $Endpoint -Response $res -Config $Config -LogPath $LogPath
             return $res
         }
         catch {
