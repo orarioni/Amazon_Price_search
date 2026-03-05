@@ -916,7 +916,7 @@ function Get-PriceBySingleAsin {
     $statusCode = if ($res.status) { [int]$res.status } else { $null }
     if ($statusCode -and $statusCode -ge 400) {
         $bodyText = $res | ConvertTo-Json -Depth 8
-        $detail = Classify-StatusAndBody -StatusCode $statusCode -BodyText $bodyText
+        $detail = Get-StatusClassification -StatusCode $statusCode -BodyText $bodyText
         return [PSCustomObject]@{ Price = $null; ErrorClass = $detail.Class }
     }
 
@@ -953,6 +953,7 @@ function Get-PriceMapByAsinSequential {
         catch {
             $detail = Get-ErrorDetail -ErrorRecord $_
             $errorClassMap[$asin] = if ($detail.Class) { $detail.Class } else { 'Other' }
+            Write-Log -Message "Pricing単発失敗: ASIN=$asin class=$($detail.Class) status=$($detail.StatusCode) msg=$($_.Exception.Message)" -LogPath $LogPath -Level 'WARN'
         }
     }
 
