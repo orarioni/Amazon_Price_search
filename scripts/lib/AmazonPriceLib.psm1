@@ -38,6 +38,7 @@ function Initialize-RunStats {
         WaitEvents         = 0
         NextPricingAllowedAt = Get-Date
         PricingCooldownSec = 0.0
+        ResponseHeaderWarningShown = $false
     }
 }
 
@@ -250,7 +251,10 @@ function Invoke-SpApiRequest {
             else {
                 $res = Invoke-RestMethod @params
                 $responseHeaders = $null
-                Write-Log -Message "$Endpoint success: response headers unavailable on this PowerShell runtime" -LogPath $LogPath -Level 'WARN'
+                if (-not $script:RunStats -or -not $script:RunStats.ResponseHeaderWarningShown) {
+                    Write-Log -Message "response headers unavailable on this PowerShell runtime (ResponseHeadersVariable unsupported)" -LogPath $LogPath -Level 'WARN'
+                    if ($script:RunStats) { $script:RunStats.ResponseHeaderWarningShown = $true }
+                }
             }
 
             $limit = Get-HeaderValue -Headers $responseHeaders -Name 'x-amzn-RateLimit-Limit'
@@ -721,13 +725,28 @@ function Get-AsinMapByJanBatch {
         return
     }
 
+    $resolveCatalogItems = {
+        param([object]$Response)
+
+        $items = Get-PropertyValue -Object $Response -Name 'items'
+        if ($items) { return @($items) }
+
+        $payload = Get-PropertyValue -Object $Response -Name 'payload'
+        if ($payload) {
+            $payloadItems = Get-PropertyValue -Object $payload -Name 'items'
+            if ($payloadItems) { return @($payloadItems) }
+        }
+
+        return @()
+    }
+
     while ($index -lt $Jans.Count) {
         $end = [Math]::Min($index + $batchSize - 1, $Jans.Count - 1)
         $chunk = @($Jans[$index..$end])
         foreach ($jan in $chunk) { $resultMap[$jan] = $null }
 
         $identifiers = ($chunk | ForEach-Object { $_.Trim() }) -join ','
-        $uri = "$($Config.SpApiBaseUrl)/catalog/2022-04-01/items?identifiers=$([Uri]::EscapeDataString($identifiers))&identifiersType=JAN&marketplaceIds=$($Config.MarketplaceId)"
+        $uri = "$($Config.SpApiBaseUrl)/catalog/2022-04-01/items?identifiers=$([Uri]::EscapeDataString($identifiers))&identifiersType=JAN&includedData=identifiers&marketplaceIds=$($Config.MarketplaceId)"
         Write-Log -Message "JAN検索: $($chunk.Count)件 (index=$index,size=$batchSize)" -LogPath $LogPath
 
         $res = $null
@@ -763,13 +782,15 @@ function Get-AsinMapByJanBatch {
             continue
         }
 
-        & $applyCatalogItems -Items $res.items -TargetMap $resultMap -TargetErrorClassMap $errorClassMap | Out-Null
+        $catalogItems = & $resolveCatalogItems -Response $res
+        Write-Log -Message "Catalog応答items件数: $($catalogItems.Count) (index=$index)" -LogPath $LogPath
+        & $applyCatalogItems -Items $catalogItems -TargetMap $resultMap -TargetErrorClassMap $errorClassMap | Out-Null
 
         $unresolvedJans = @($chunk | Where-Object { -not $resultMap[$_] })
         Write-Log -Message "EANフォールバック件数: $($unresolvedJans.Count)件 (index=$index)" -LogPath $LogPath
         if ($unresolvedJans.Count -gt 0) {
             $eanIdentifiers = ($unresolvedJans | ForEach-Object { $_.Trim() }) -join ','
-            $eanUri = "$($Config.SpApiBaseUrl)/catalog/2022-04-01/items?identifiers=$([Uri]::EscapeDataString($eanIdentifiers))&identifiersType=EAN&marketplaceIds=$($Config.MarketplaceId)"
+            $eanUri = "$($Config.SpApiBaseUrl)/catalog/2022-04-01/items?identifiers=$([Uri]::EscapeDataString($eanIdentifiers))&identifiersType=EAN&includedData=identifiers&marketplaceIds=$($Config.MarketplaceId)"
 
             $eanRes = $null
             $eanAttemptDetail = $null
@@ -790,7 +811,9 @@ function Get-AsinMapByJanBatch {
             }
 
             if ($eanRes) {
-                & $applyCatalogItems -Items $eanRes.items -TargetMap $resultMap -TargetErrorClassMap $errorClassMap | Out-Null
+                $eanItems = & $resolveCatalogItems -Response $eanRes
+                Write-Log -Message "Catalog EAN応答items件数: $($eanItems.Count) (index=$index)" -LogPath $LogPath
+                & $applyCatalogItems -Items $eanItems -TargetMap $resultMap -TargetErrorClassMap $errorClassMap | Out-Null
             }
             elseif ($eanAttemptDetail) {
                 foreach ($jan in $unresolvedJans) {
