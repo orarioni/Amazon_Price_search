@@ -30,7 +30,7 @@ function Write-Log {
 function Initialize-RunStats {
     $script:RunStats = [ordered]@{
         TotalApiCalls      = 0
-        PricingBatchCalls  = 0
+        PricingCalls       = 0
         CatalogBatchCalls  = 0
         RetryCount         = 0
         Http429Count       = 0
@@ -234,7 +234,7 @@ function Invoke-SpApiRequest {
         $responseHeaders = $null
         try {
             if ($script:RunStats) { $script:RunStats.TotalApiCalls++ }
-            if ($Endpoint -match '^Pricing') { $script:RunStats.PricingBatchCalls++ }
+            if ($Endpoint -match '^Pricing') { $script:RunStats.PricingCalls++ }
             if ($Endpoint -match '^CatalogBatch') { $script:RunStats.CatalogBatchCalls++ }
 
             $params = @{ Method = $Method; Uri = $Uri; Headers = $Headers }
@@ -857,7 +857,7 @@ function Get-PriceBySingleAsin {
     return [PSCustomObject]@{ Price = $price; ErrorClass = $null }
 }
 
-function Get-PriceMapByAsinBatch {
+function Get-PriceMapByAsinSequential {
     param(
         [array]$Asins,
         [string]$AccessToken,
@@ -885,6 +885,60 @@ function Get-PriceMapByAsinBatch {
     }
 
     [PSCustomObject]@{ PriceMap = $priceMap; ErrorClassMap = $errorClassMap }
+}
+
+# Backward-compatibility wrapper
+function Get-PriceMapByAsinBatch {
+    param(
+        [array]$Asins,
+        [string]$AccessToken,
+        [hashtable]$Config,
+        [string]$LogPath,
+        [hashtable]$AuthContext
+    )
+
+    Get-PriceMapByAsinSequential -Asins $Asins -AccessToken $AccessToken -Config $Config -LogPath $LogPath -AuthContext $AuthContext
+}
+
+function Get-FunctionDependencyMap {
+    [ordered]@{
+        ConvertTo-PlainText = @()
+        Write-Log = @()
+        Initialize-RunStats = @()
+        Add-WaitMetric = @()
+        Get-HeaderValue = @()
+        Get-PropertyValue = @()
+        Mask-SensitiveText = @()
+        Write-SpApiResponseDebugLog = @('Get-PropertyValue','Write-Log','Mask-SensitiveText')
+        Wait-ForPricingSlot = @('Add-WaitMetric')
+        Update-PricingThrottleFromLimit = @()
+        Invoke-SpApiRequest = @('Get-ErrorDetail','Get-HeaderValue','Write-SpApiResponseDebugLog','Update-PricingThrottleFromLimit','Write-Log')
+        Get-StatusClassification = @()
+        Get-ErrorDetail = @('Get-StatusClassification')
+        Invoke-WithRetry = @('Write-Log')
+        Get-AmzDateHeaderValue = @()
+        New-SpApiHeaders = @('Get-AmzDateHeaderValue')
+        Split-IntoChunks = @()
+        Read-AccessTokenCache = @()
+        Save-AccessTokenCache = @()
+        Get-LwaAccessTokenCached = @('Read-AccessTokenCache','Save-AccessTokenCache','Get-LwaAccessToken')
+        Get-LwaAccessToken = @('Invoke-WithRetry')
+        Get-LowestNewPriceFromOffers = @()
+        Get-AsinMapByJanBatch = @('Invoke-SpApiRequest','New-SpApiHeaders','Split-IntoChunks','Get-ErrorDetail','Get-StatusClassification','Get-LwaAccessTokenCached')
+        Get-PriceBySingleAsin = @('Wait-ForPricingSlot','Invoke-SpApiRequest','New-SpApiHeaders','Get-LowestNewPriceFromOffers','Get-ErrorDetail','Get-LwaAccessTokenCached')
+        Get-PriceMapByAsinSequential = @('Get-PriceBySingleAsin','Get-ErrorDetail')
+        Get-PriceMapByAsinBatch = @('Get-PriceMapByAsinSequential')
+        Import-PersistentCache = @('Write-Log')
+        Save-PersistentCache = @('Write-Log')
+        Add-DailyPriceHistory = @('Write-Log')
+        Get-JanCacheKey = @()
+        Get-OfferCacheKey = @()
+        Get-CacheTtlHoursByStatus = @()
+        Test-CacheFreshByStatus = @('Get-CacheTtlHoursByStatus','Test-CacheFresh')
+        Test-CacheFresh = @()
+        Save-SecretsInteractive = @()
+        Invoke-AmazonPriceUpdate = @('Import-PersistentCache','Get-LwaAccessTokenCached','Get-AsinMapByJanBatch','Get-PriceMapByAsinSequential','Save-PersistentCache','Add-DailyPriceHistory','Get-JanCacheKey','Get-OfferCacheKey','Test-CacheFreshByStatus','ConvertTo-PlainText','Initialize-RunStats','Get-ErrorDetail','Write-Log')
+    }
 }
 
 function Import-PersistentCache {
@@ -1126,6 +1180,7 @@ function Invoke-AmazonPriceUpdate {
 
         $janList = @($targetJans)
         $needApiJans = @()
+        Write-Log -Message "依存チェック: 入力JAN収集完了 (rows=$totalDataRows, unique_jan=$($janList.Count))" -LogPath $logPath
 
         foreach ($jan in $janList) {
             $janCacheKey = Get-JanCacheKey -MarketplaceId $Config.MarketplaceId -Jan $jan
@@ -1140,6 +1195,7 @@ function Invoke-AmazonPriceUpdate {
         }
 
         $uniqueAsinCount = 0
+        Write-Log -Message "依存チェック: JANキャッシュ判定完了 (api_required_jan=$($needApiJans.Count))" -LogPath $logPath
         if ($needApiJans.Count -gt 0) {
             $catalogResult = Get-AsinMapByJanBatch -Jans $needApiJans -AccessToken $accessToken -Config $Config -LogPath $logPath -AuthContext $authContext
             $asinMap = $catalogResult.AsinMap
@@ -1173,12 +1229,13 @@ function Invoke-AmazonPriceUpdate {
 
             if ($needPriceAsins.Count -gt 0) {
                 $distinctAsins = @($needPriceAsins | Sort-Object -Unique)
-                $pricingResult = Get-PriceMapByAsinBatch -Asins $distinctAsins -AccessToken $accessToken -Config $Config -LogPath $logPath -AuthContext $authContext
+                $pricingResult = Get-PriceMapByAsinSequential -Asins $distinctAsins -AccessToken $accessToken -Config $Config -LogPath $logPath -AuthContext $authContext
                 foreach ($k in $pricingResult.PriceMap.Keys) { $priceMap[$k] = $pricingResult.PriceMap[$k] }
                 foreach ($k in $pricingResult.ErrorClassMap.Keys) { $priceErrorMap[$k] = $pricingResult.ErrorClassMap[$k] }
-                $pricingApiCalls = $script:RunStats.PricingBatchCalls
+                $pricingApiCalls = $script:RunStats.PricingCalls
             }
 
+            Write-Log -Message "依存チェック: Pricing確定 (need_price_asin=$($needPriceAsins.Count), resolved_asin=$uniqueAsinCount)" -LogPath $logPath
             $fetchedAt = (Get-Date).ToString('o')
             foreach ($jan in $needApiJans) {
                 $cacheStatus = 'ok'
@@ -1288,6 +1345,7 @@ function Invoke-AmazonPriceUpdate {
             $processed++
         }
 
+        Write-Log -Message "依存チェック: runCache確定・Excel反映完了" -LogPath $logPath
         Save-PersistentCache -CacheMap $persistentCache -Path $cachePath
         $historySavedCount = Add-DailyPriceHistory -RunCache $runCache -DirPath $historyDir
         Write-Log -Message "価格履歴の追記件数: $historySavedCount" -LogPath $logPath
@@ -1324,4 +1382,4 @@ function Invoke-AmazonPriceUpdate {
     }
 }
 
-Export-ModuleMember -Function ConvertTo-PlainText,Write-Log,Get-StatusClassification,Get-ErrorDetail,Invoke-WithRetry,Get-AmzDateHeaderValue,New-SpApiHeaders,Split-IntoChunks,Read-AccessTokenCache,Save-AccessTokenCache,Get-LwaAccessTokenCached,Get-LwaAccessToken,Get-LowestNewPriceFromOffers,Get-PriceBySingleAsin,Get-AsinMapByJanBatch,Get-PriceMapByAsinBatch,Import-PersistentCache,Save-PersistentCache,Add-DailyPriceHistory,Test-CacheFresh,Save-SecretsInteractive,Invoke-AmazonPriceUpdate
+Export-ModuleMember -Function ConvertTo-PlainText,Write-Log,Get-StatusClassification,Get-ErrorDetail,Invoke-WithRetry,Get-AmzDateHeaderValue,New-SpApiHeaders,Split-IntoChunks,Read-AccessTokenCache,Save-AccessTokenCache,Get-LwaAccessTokenCached,Get-LwaAccessToken,Get-LowestNewPriceFromOffers,Get-PriceBySingleAsin,Get-AsinMapByJanBatch,Get-PriceMapByAsinSequential,Get-PriceMapByAsinBatch,Get-FunctionDependencyMap,Import-PersistentCache,Save-PersistentCache,Add-DailyPriceHistory,Test-CacheFresh,Save-SecretsInteractive,Invoke-AmazonPriceUpdate
