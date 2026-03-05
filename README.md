@@ -119,6 +119,8 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 - JAN→ASIN キャッシュTTL: 7日（`JanAsinCacheTtlHours`）
 - ASIN→Offers キャッシュTTL: 24時間（`OfferCacheTtlHours`）
 - negative cache TTL: 12時間（`NegativeCacheTtlHours`）
+- SP-API応答デバッグ: `DebugSpApiResponse=$true` で要点ログ（`status / errors / request.uri / payload.ASIN / Offers.Count`）をターミナルとログへ出力
+- 応答全文の出力上限: `DebugSpApiResponseMaxChars`（既定 4000 文字、機微情報はマスク）
 - `ok` / `not_found` はキャッシュ保持
 - `transient_error` は永続化しない（次回再取得）
 
