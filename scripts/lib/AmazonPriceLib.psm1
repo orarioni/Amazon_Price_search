@@ -623,16 +623,23 @@ function Get-LowestNewPriceFromOffers {
     $fallbackMin = $null
 
     foreach ($offer in $Offers) {
-        if ($offer.LandedPrice -and $null -ne $offer.LandedPrice.Amount) {
-            $landed = [decimal]$offer.LandedPrice.Amount
+        $landedPrice = Get-PropertyValue -Object $offer -Name 'LandedPrice'
+        $landedAmount = Get-PropertyValue -Object $landedPrice -Name 'Amount'
+        if ($null -ne $landedAmount -and "$landedAmount" -ne '') {
+            $landed = [decimal]$landedAmount
             if ($null -eq $landedMin -or $landed -lt $landedMin) {
                 $landedMin = $landed
             }
             continue
         }
 
-        if ($offer.ListingPrice -and $offer.Shipping -and $null -ne $offer.ListingPrice.Amount -and $null -ne $offer.Shipping.Amount) {
-            $listingPlusShip = [decimal]$offer.ListingPrice.Amount + [decimal]$offer.Shipping.Amount
+        $listingPrice = Get-PropertyValue -Object $offer -Name 'ListingPrice'
+        $shippingPrice = Get-PropertyValue -Object $offer -Name 'Shipping'
+        $listingAmount = Get-PropertyValue -Object $listingPrice -Name 'Amount'
+        $shippingAmount = Get-PropertyValue -Object $shippingPrice -Name 'Amount'
+
+        if ($null -ne $listingAmount -and "$listingAmount" -ne '' -and $null -ne $shippingAmount -and "$shippingAmount" -ne '') {
+            $listingPlusShip = [decimal]$listingAmount + [decimal]$shippingAmount
             if ($null -eq $fallbackMin -or $listingPlusShip -lt $fallbackMin) {
                 $fallbackMin = $listingPlusShip
             }
