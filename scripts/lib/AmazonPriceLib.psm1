@@ -122,9 +122,12 @@ function Write-SpApiResponseDebugLog {
 
     $shouldLogFull = $false
 
-    if ($Response -and $Response.responses) {
+    $responses = Get-PropertyValue -Object $Response -Name 'responses'
+    if ($responses) {
+        $responseItems = @($responses)
+        $responseCount = $responseItems.Count
         $index = 0
-        foreach ($item in $Response.responses) {
+        foreach ($item in $responseItems) {
             $index++
             $status = Get-PropertyValue -Object $item -Name 'status'
             $request = Get-PropertyValue -Object $item -Name 'request'
@@ -137,7 +140,7 @@ function Write-SpApiResponseDebugLog {
             $offersCount = if ($offers) { @($offers).Count } else { 0 }
             $errorCount = if ($errors) { @($errors).Count } else { 0 }
 
-            Write-Log -Message "$Endpoint debug[$index/$($Response.responses.Count)]: status=$status request.uri=$requestUri payload.ASIN=$asin offers.count=$offersCount errors.count=$errorCount" -LogPath $LogPath
+            Write-Log -Message "$Endpoint debug[$index/$responseCount]: status=$status request.uri=$requestUri payload.ASIN=$asin offers.count=$offersCount errors.count=$errorCount" -LogPath $LogPath
             if (($status -as [int]) -ge 400 -or $errorCount -gt 0) { $shouldLogFull = $true }
         }
     }
