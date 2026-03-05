@@ -76,6 +76,178 @@ function Get-PropertyValue {
     return $property.Value
 }
 
+
+function ConvertTo-ObjectArray {
+    param([object]$Value)
+
+    if ($null -eq $Value) { return @() }
+    if ($Value -is [string]) { return @($Value) }
+    if ($Value -is [System.Array]) { return @($Value) }
+    if ($Value -is [System.Collections.IList]) { return @($Value) }
+    if ($Value -is [System.Collections.IEnumerable]) {
+        return @($Value)
+    }
+
+    return @($Value)
+}
+
+function Get-ObjectTypeName {
+    param([object]$Value)
+
+    if ($null -eq $Value) { return '<null>' }
+
+    try {
+        return $Value.GetType().FullName
+    }
+    catch {
+        return '<unknown>'
+    }
+}
+
+function Get-IdentifierMatchKeys {
+    param([string]$Identifier)
+
+    $keys = New-Object System.Collections.Generic.List[string]
+    if ([string]::IsNullOrWhiteSpace($Identifier)) { return @() }
+
+    $trimmed = $Identifier.Trim()
+    if (-not [string]::IsNullOrWhiteSpace($trimmed)) {
+        $keys.Add($trimmed)
+    }
+
+    $digits = [regex]::Replace($trimmed, '[^0-9]', '')
+    if (-not [string]::IsNullOrWhiteSpace($digits)) {
+        $keys.Add($digits)
+        $trimmedZero = $digits.TrimStart('0')
+        if (-not [string]::IsNullOrWhiteSpace($trimmedZero)) {
+            $keys.Add($trimmedZero)
+        }
+    }
+
+    return @($keys | Select-Object -Unique)
+}
+
+function Find-TargetJanByIdentifier {
+    param(
+        [string]$Identifier,
+        [hashtable]$JanLookupMap
+    )
+
+    if (-not $JanLookupMap) { return $null }
+
+    foreach ($key in (Get-IdentifierMatchKeys -Identifier $Identifier)) {
+        if ($JanLookupMap.ContainsKey($key)) {
+            return [string]$JanLookupMap[$key]
+        }
+    }
+
+    return $null
+}
+
+function Get-CatalogIdentifierSampleText {
+    param([object]$Items)
+
+    if (-not $Items) { return '<no-items>' }
+
+    $samples = New-Object System.Collections.Generic.List[string]
+    foreach ($item in (ConvertTo-ObjectArray -Value $Items)) {
+        $itemIdentifiers = Get-PropertyValue -Object $item -Name 'identifiers'
+        if (-not $itemIdentifiers) { continue }
+
+        $groups = Get-PropertyValue -Object $itemIdentifiers -Name 'identifiers'
+        if ($groups) { $groups = ConvertTo-ObjectArray -Value $groups }
+        else { $groups = ConvertTo-ObjectArray -Value $itemIdentifiers }
+
+        foreach ($group in $groups) {
+            $leafs = Get-PropertyValue -Object $group -Name 'identifiers'
+            if ($leafs) { $leafs = ConvertTo-ObjectArray -Value $leafs }
+            else { $leafs = ConvertTo-ObjectArray -Value $group }
+
+            foreach ($leaf in $leafs) {
+                $identifierType = [string](Get-PropertyValue -Object $leaf -Name 'identifierType')
+                $identifierValue = [string](Get-PropertyValue -Object $leaf -Name 'identifier')
+                if ([string]::IsNullOrWhiteSpace($identifierValue)) {
+                    $identifierValue = [string](Get-PropertyValue -Object $leaf -Name 'value')
+                }
+                if ([string]::IsNullOrWhiteSpace($identifierValue)) { continue }
+
+                $samples.Add(("{0}:{1}" -f $identifierType, $identifierValue))
+                if ($samples.Count -ge 5) {
+                    return ($samples -join ';')
+                }
+            }
+        }
+    }
+
+    if ($samples.Count -eq 0) { return '<no-identifiers>' }
+    return ($samples -join ';')
+}
+
+function Expand-CatalogItems {
+    param([object]$Items)
+
+    if ($null -eq $Items) { return @() }
+
+    $arr = ConvertTo-ObjectArray -Value $Items
+    if ($arr.Count -eq 1) {
+        $single = $arr[0]
+        $singleAsin = Get-PropertyValue -Object $single -Name 'asin'
+        if (-not $singleAsin) {
+            $nestedItems = Get-PropertyValue -Object $single -Name 'items'
+            if ($nestedItems) {
+                return ConvertTo-ObjectArray -Value $nestedItems
+            }
+
+            $nestedItem = Get-PropertyValue -Object $single -Name 'item'
+            if ($nestedItem) {
+                return ConvertTo-ObjectArray -Value $nestedItem
+            }
+
+            $propertyNames = @($single.PSObject.Properties.Name)
+            if ($propertyNames.Count -gt 0 -and @($propertyNames | Where-Object { $_ -match '^\d+$' }).Count -gt 0) {
+                $values = @()
+                foreach ($name in $propertyNames | Sort-Object {[int]$_}) {
+                    $values += $single.PSObject.Properties[$name].Value
+                }
+                if ($values.Count -gt 0) {
+                    return @($values)
+                }
+            }
+        }
+    }
+
+    return @($arr)
+}
+
+function Write-SpApiResponseShapeLog {
+    param(
+        [string]$Endpoint,
+        [object]$Response,
+        [string]$LogPath
+    )
+
+    if ($null -eq $Response) {
+        Write-Log -Message "$Endpoint response-shape: <null>" -LogPath $LogPath -Level 'WARN'
+        return
+    }
+
+    $responseType = $Response.GetType().FullName
+    $topProperties = @($Response.PSObject.Properties.Name)
+    $topPropertyText = if ($topProperties.Count -gt 0) { ($topProperties -join ',') } else { '<none>' }
+
+    $items = Get-PropertyValue -Object $Response -Name 'items'
+    $responses = Get-PropertyValue -Object $Response -Name 'responses'
+    $payload = Get-PropertyValue -Object $Response -Name 'payload'
+    $errors = Get-PropertyValue -Object $Response -Name 'errors'
+
+    $itemsCount = if ($items) { @($items).Count } else { 0 }
+    $responsesCount = if ($responses) { @($responses).Count } else { 0 }
+    $errorCount = if ($errors) { @($errors).Count } else { 0 }
+    $hasPayload = $null -ne $payload
+
+    Write-Log -Message "$Endpoint response-shape: type=$responseType props=[$topPropertyText] items.count=$itemsCount responses.count=$responsesCount errors.count=$errorCount hasPayload=$hasPayload" -LogPath $LogPath -Level 'WARN'
+}
+
 function Mask-SensitiveText {
     param([string]$Text)
 
@@ -122,9 +294,11 @@ function Write-SpApiResponseDebugLog {
 
     $shouldLogFull = $false
 
-    if ($Response -and $Response.responses) {
+    $batchResponses = Get-PropertyValue -Object $Response -Name 'responses'
+    if ($batchResponses) {
         $index = 0
-        foreach ($item in $Response.responses) {
+        $batchResponsesArray = @($batchResponses)
+        foreach ($item in $batchResponsesArray) {
             $index++
             $status = Get-PropertyValue -Object $item -Name 'status'
             $request = Get-PropertyValue -Object $item -Name 'request'
@@ -137,7 +311,7 @@ function Write-SpApiResponseDebugLog {
             $offersCount = if ($offers) { @($offers).Count } else { 0 }
             $errorCount = if ($errors) { @($errors).Count } else { 0 }
 
-            Write-Log -Message "$Endpoint debug[$index/$($Response.responses.Count)]: status=$status request.uri=$requestUri payload.ASIN=$asin offers.count=$offersCount errors.count=$errorCount" -LogPath $LogPath
+            Write-Log -Message "$Endpoint debug[$index/$($batchResponsesArray.Count)]: status=$status request.uri=$requestUri payload.ASIN=$asin offers.count=$offersCount errors.count=$errorCount" -LogPath $LogPath
             if (($status -as [int]) -ge 400 -or $errorCount -gt 0) { $shouldLogFull = $true }
         }
     }
@@ -258,7 +432,16 @@ function Invoke-SpApiRequest {
             if ($Endpoint -match '^Pricing') {
                 Update-PricingThrottleFromLimit -RateLimitLimit $limit -Config $Config
             }
-            Write-SpApiResponseDebugLog -Endpoint $Endpoint -Response $res -Config $Config -LogPath $LogPath
+            try {
+                Write-SpApiResponseDebugLog -Endpoint $Endpoint -Response $res -Config $Config -LogPath $LogPath
+            }
+            catch {
+                Write-Log -Message "$Endpoint debug-hook failed: $($_.Exception.GetType().FullName) - $($_.Exception.Message)" -LogPath $LogPath -Level 'WARN'
+                Write-SpApiResponseShapeLog -Endpoint $Endpoint -Response $res -LogPath $LogPath
+                if ($_.ScriptStackTrace) {
+                    Write-Log -Message "$Endpoint debug-hook stack: $($_.ScriptStackTrace)" -LogPath $LogPath -Level 'WARN'
+                }
+            }
             return $res
         }
         catch {
@@ -267,6 +450,13 @@ function Invoke-SpApiRequest {
             if ($status -eq 0) {
                 # log the raw exception for troubleshooting
                 Write-Log -Message "Invoke-SpApiRequest exception: $($_.Exception.GetType().FullName) - $($_.Exception.Message)" -LogPath $LogPath -Level 'WARN'
+                Write-Log -Message "Invoke-SpApiRequest context: endpoint=$Endpoint method=$Method uri=$Uri attempt=$attempt/$maxAttempts" -LogPath $LogPath -Level 'WARN'
+                if ($_.InvocationInfo -and $_.InvocationInfo.PositionMessage) {
+                    Write-Log -Message "Invoke-SpApiRequest location: $($_.InvocationInfo.PositionMessage)" -LogPath $LogPath -Level 'WARN'
+                }
+                if ($_.ScriptStackTrace) {
+                    Write-Log -Message "Invoke-SpApiRequest stack: $($_.ScriptStackTrace)" -LogPath $LogPath -Level 'WARN'
+                }
             }
             if ($status -eq 403) {
                 Write-Log -Message "HTTP 403 exception: $($_.Exception.GetType().FullName) - $($_.Exception.Message)" -LogPath $LogPath -Level 'WARN'
@@ -658,28 +848,42 @@ function Get-AsinMapByJanBatch {
         param(
             [object]$Items,
             [hashtable]$TargetMap,
-            [hashtable]$TargetErrorClassMap
+            [hashtable]$TargetErrorClassMap,
+            [hashtable]$TargetJanLookupMap,
+            [hashtable]$ParseStats
         )
 
         if (-not $Items) { return }
 
-        foreach ($item in $Items) {
+        if ($ParseStats) {
+            if (-not $ParseStats.ContainsKey('ExpandedItems')) { $ParseStats.ExpandedItems = 0 }
+            if (-not $ParseStats.ContainsKey('ItemsWithoutIdentifiers')) { $ParseStats.ItemsWithoutIdentifiers = 0 }
+            if (-not $ParseStats.ContainsKey('IdentifierCandidates')) { $ParseStats.IdentifierCandidates = 0 }
+            if (-not $ParseStats.ContainsKey('MatchedIdentifiers')) { $ParseStats.MatchedIdentifiers = 0 }
+            if (-not $ParseStats.ContainsKey('ItemsWithAsin')) { $ParseStats.ItemsWithAsin = 0 }
+        }
+
+        foreach ($item in (Expand-CatalogItems -Items $Items)) {
+            if ($ParseStats) { $ParseStats.ExpandedItems++ }
             $itemIdentifiers = Get-PropertyValue -Object $item -Name 'identifiers'
-            if (-not $itemIdentifiers) { continue }
+            if (-not $itemIdentifiers) {
+                if ($ParseStats) { $ParseStats.ItemsWithoutIdentifiers++ }
+                continue
+            }
 
             $identifierGroups = @()
-            # Catalog Items API の identifiers は配列で返る実装があるため、
-            # 直接配列として扱える場合はそのまま利用する。
-            if ($itemIdentifiers -is [System.Collections.IEnumerable] -and -not ($itemIdentifiers -is [string])) {
-                $identifierGroups = @($itemIdentifiers)
+            $nestedGroups = Get-PropertyValue -Object $itemIdentifiers -Name 'identifiers'
+            if ($nestedGroups) {
+                $identifierGroups = ConvertTo-ObjectArray -Value $nestedGroups
             }
             else {
-                $nestedGroups = Get-PropertyValue -Object $itemIdentifiers -Name 'identifiers'
-                if ($nestedGroups) {
-                    $identifierGroups = @($nestedGroups)
-                }
+                $identifierGroups = ConvertTo-ObjectArray -Value $itemIdentifiers
             }
-            if ($identifierGroups.Count -eq 0) { continue }
+
+            if ($identifierGroups.Count -eq 0) {
+                Write-Log -Message "Catalog identifier parse: empty identifierGroups (item.identifiers.type=$(Get-ObjectTypeName -Value $itemIdentifiers), nested.type=$(Get-ObjectTypeName -Value $nestedGroups))" -LogPath $LogPath -Level 'WARN'
+                continue
+            }
 
             $matchedIdentifier = $null
             foreach ($idGroup in $identifierGroups) {
@@ -688,19 +892,24 @@ function Get-AsinMapByJanBatch {
                 $leafIdentifiers = @()
                 $nestedLeafIdentifiers = Get-PropertyValue -Object $idGroup -Name 'identifiers'
                 if ($nestedLeafIdentifiers) {
-                    $leafIdentifiers = @($nestedLeafIdentifiers)
+                    $leafIdentifiers = ConvertTo-ObjectArray -Value $nestedLeafIdentifiers
                 }
                 else {
-                    $leafIdentifiers = @($idGroup)
+                    $leafIdentifiers = ConvertTo-ObjectArray -Value $idGroup
                 }
 
                 foreach ($leaf in $leafIdentifiers) {
                     $identifierType = [string](Get-PropertyValue -Object $leaf -Name 'identifierType')
                     $identifierValue = [string](Get-PropertyValue -Object $leaf -Name 'identifier')
-                    if (($identifierType -in @('JAN', 'EAN')) -and -not [string]::IsNullOrWhiteSpace($identifierValue)) {
-                        $normalizedIdentifier = $identifierValue.Trim()
-                        if ($TargetMap.ContainsKey($normalizedIdentifier)) {
-                            $matchedIdentifier = $normalizedIdentifier
+                    if ([string]::IsNullOrWhiteSpace($identifierValue)) {
+                        $identifierValue = [string](Get-PropertyValue -Object $leaf -Name 'value')
+                    }
+                    if (($identifierType -in @('JAN', 'EAN', 'UPC', 'GTIN')) -and -not [string]::IsNullOrWhiteSpace($identifierValue)) {
+                        if ($ParseStats) { $ParseStats.IdentifierCandidates++ }
+                        $matchedOriginalJan = Find-TargetJanByIdentifier -Identifier $identifierValue -JanLookupMap $TargetJanLookupMap
+                        if ($matchedOriginalJan) {
+                            if ($ParseStats) { $ParseStats.MatchedIdentifiers++ }
+                            $matchedIdentifier = $matchedOriginalJan
                             break
                         }
                     }
@@ -710,6 +919,7 @@ function Get-AsinMapByJanBatch {
 
             $asin = [string](Get-PropertyValue -Object $item -Name 'asin')
             if ($matchedIdentifier -and -not [string]::IsNullOrWhiteSpace($asin)) {
+                if ($ParseStats) { $ParseStats.ItemsWithAsin++ }
                 $TargetMap[$matchedIdentifier] = $asin
                 $TargetErrorClassMap.Remove($matchedIdentifier) | Out-Null
             }
@@ -721,7 +931,16 @@ function Get-AsinMapByJanBatch {
     while ($index -lt $Jans.Count) {
         $end = [Math]::Min($index + $batchSize - 1, $Jans.Count - 1)
         $chunk = @($Jans[$index..$end])
-        foreach ($jan in $chunk) { $resultMap[$jan] = $null }
+        $chunkJanLookupMap = @{}
+        $chunkParseStats = @{}
+        foreach ($jan in $chunk) {
+            $resultMap[$jan] = $null
+            foreach ($lookupKey in (Get-IdentifierMatchKeys -Identifier ([string]$jan))) {
+                if (-not $chunkJanLookupMap.ContainsKey($lookupKey)) {
+                    $chunkJanLookupMap[$lookupKey] = [string]$jan
+                }
+            }
+        }
 
         $identifiers = ($chunk | ForEach-Object { $_.Trim() }) -join ','
         $uri = "$($Config.SpApiBaseUrl)/catalog/2022-04-01/items?identifiers=$([Uri]::EscapeDataString($identifiers))&identifiersType=JAN&marketplaceIds=$($Config.MarketplaceId)"
@@ -760,41 +979,20 @@ function Get-AsinMapByJanBatch {
             continue
         }
 
-        & $applyCatalogItems -Items $res.items -TargetMap $resultMap -TargetErrorClassMap $errorClassMap | Out-Null
+        $catalogItems = Get-PropertyValue -Object $res -Name 'items'
+        & $applyCatalogItems -Items $catalogItems -TargetMap $resultMap -TargetErrorClassMap $errorClassMap -TargetJanLookupMap $chunkJanLookupMap -ParseStats $chunkParseStats | Out-Null
 
         $unresolvedJans = @($chunk | Where-Object { -not $resultMap[$_] })
-        Write-Log -Message "EANフォールバック件数: $($unresolvedJans.Count)件 (index=$index)" -LogPath $LogPath
-        if ($unresolvedJans.Count -gt 0) {
-            $eanIdentifiers = ($unresolvedJans | ForEach-Object { $_.Trim() }) -join ','
-            $eanUri = "$($Config.SpApiBaseUrl)/catalog/2022-04-01/items?identifiers=$([Uri]::EscapeDataString($eanIdentifiers))&identifiersType=EAN&marketplaceIds=$($Config.MarketplaceId)"
-
-            $eanRes = $null
-            $eanAttemptDetail = $null
-            try {
-                $eanRes = Invoke-SpApiRequest -Endpoint "CatalogBatchEanFallback(index=$index,size=$($unresolvedJans.Count))" -Method 'Get' -Uri $eanUri -Headers (New-SpApiHeaders -AccessToken $AccessToken -Config $Config) -Config $Config -LogPath $LogPath
-            }
-            catch {
-                $eanAttemptDetail = Get-ErrorDetail -ErrorRecord $_
-                if ($eanAttemptDetail.Class -eq 'Auth' -and $AuthContext) {
-                    try {
-                        $AccessToken = Get-LwaAccessTokenCached -ClientId $AuthContext.ClientId -ClientSecret $AuthContext.ClientSecret -RefreshToken $AuthContext.RefreshToken -Config $Config -LogPath $LogPath -TokenCachePath $AuthContext.TokenCachePath -ForceRefresh
-                        $eanRes = Invoke-SpApiRequest -Endpoint "CatalogBatchEanFallbackAuthRetry(index=$index,size=$($unresolvedJans.Count))" -Method 'Get' -Uri $eanUri -Headers (New-SpApiHeaders -AccessToken $AccessToken -Config $Config) -Config $Config -LogPath $LogPath
-                    }
-                    catch {
-                        $eanAttemptDetail = Get-ErrorDetail -ErrorRecord $_
-                    }
-                }
-            }
-
-            if ($eanRes) {
-                & $applyCatalogItems -Items $eanRes.items -TargetMap $resultMap -TargetErrorClassMap $errorClassMap | Out-Null
-            }
-            elseif ($eanAttemptDetail) {
-                foreach ($jan in $unresolvedJans) {
-                    $errorClassMap[$jan] = $eanAttemptDetail.Class
-                }
-            }
+        if ($chunkParseStats.Count -gt 0) {
+            Write-Log -Message "Catalog parse stats: index=$index size=$($chunk.Count) expanded=$($chunkParseStats.ExpandedItems) withoutIdentifiers=$($chunkParseStats.ItemsWithoutIdentifiers) identifierCandidates=$($chunkParseStats.IdentifierCandidates) matchedIdentifiers=$($chunkParseStats.MatchedIdentifiers) itemsWithAsin=$($chunkParseStats.ItemsWithAsin) unresolved=$($unresolvedJans.Count)" -LogPath $LogPath
         }
+        if ($unresolvedJans.Count -eq $chunk.Count) {
+            $sampleText = Get-CatalogIdentifierSampleText -Items $catalogItems
+            $numberOfResults = Get-PropertyValue -Object $res -Name 'numberOfResults'
+            $expandedCount = (Expand-CatalogItems -Items $catalogItems).Count
+            Write-Log -Message "Catalog parse diagnostic: all unresolved in chunk (index=$index,size=$($chunk.Count), response.items.type=$(Get-ObjectTypeName -Value $catalogItems), expanded.items.count=$expandedCount, numberOfResults=$numberOfResults, response.props=$((@($res.PSObject.Properties.Name) -join ',')), sample.identifiers=$sampleText)" -LogPath $LogPath -Level 'WARN'
+        }
+        Write-Log -Message "EANフォールバックは無効化されています: unresolved=$($unresolvedJans.Count)件 (index=$index)" -LogPath $LogPath
 
         foreach ($jan in $chunk) {
             if (-not $resultMap[$jan] -and -not $errorClassMap.ContainsKey($jan)) {
@@ -958,14 +1156,15 @@ function Get-PriceMapByAsinBatch {
             continue
         }
 
-        if (-not $res.responses) {
+        $responseItems = Get-PropertyValue -Object $res -Name 'responses'
+        if (-not $responseItems) {
             foreach ($asin in $chunk) { $errorClassMap[$asin] = 'Other' }
             $index = $end + 1
             continue
         }
 
         $retryableResponseAsins = New-Object System.Collections.Generic.List[string]
-        foreach ($response in $res.responses) {
+        foreach ($response in @($responseItems)) {
             $statusCode = if ($response.status) { [int]$response.status } else { $null }
 
             $asin = $null
