@@ -751,7 +751,7 @@ function Get-AsinMapByJanBatch {
         $singleUri = "$($Config.SpApiBaseUrl)/catalog/2022-04-01/items?identifiers=$([Uri]::EscapeDataString($Identifier.Trim()))&identifiersType=$IdentifiersType&includedData=identifiers&marketplaceIds=$($Config.MarketplaceId)"
         try {
             $singleRes = Invoke-SpApiRequest -Endpoint "CatalogSingleFallback(type=$IdentifiersType)" -Method 'Get' -Uri $singleUri -Headers (New-SpApiHeaders -AccessToken $AccessToken -Config $Config) -Config $Config -LogPath $LogPath
-            $singleItems = & $resolveCatalogItems -Response $singleRes
+            $singleItems = @(& $resolveCatalogItems -Response $singleRes)
             if ($singleItems.Count -gt 0) {
                 $firstAsin = [string](Get-PropertyValue -Object $singleItems[0] -Name 'asin')
                 if (-not [string]::IsNullOrWhiteSpace($firstAsin)) {
@@ -808,7 +808,7 @@ function Get-AsinMapByJanBatch {
             continue
         }
 
-        $catalogItems = & $resolveCatalogItems -Response $res
+        $catalogItems = @(& $resolveCatalogItems -Response $res)
         Write-Log -Message "Catalog応答items件数: $($catalogItems.Count) (index=$index)" -LogPath $LogPath
         & $applyCatalogItems -Items $catalogItems -TargetMap $resultMap -TargetErrorClassMap $errorClassMap | Out-Null
 
@@ -837,7 +837,7 @@ function Get-AsinMapByJanBatch {
             }
 
             if ($eanRes) {
-                $eanItems = & $resolveCatalogItems -Response $eanRes
+                $eanItems = @(& $resolveCatalogItems -Response $eanRes)
                 Write-Log -Message "Catalog EAN応答items件数: $($eanItems.Count) (index=$index)" -LogPath $LogPath
                 & $applyCatalogItems -Items $eanItems -TargetMap $resultMap -TargetErrorClassMap $errorClassMap | Out-Null
             }
