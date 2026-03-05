@@ -565,9 +565,8 @@ function Get-AsinMapByJanBatch {
             [hashtable]$TargetErrorClassMap
         )
 
-        if (-not $Items) { return 0 }
+        if (-not $Items) { return }
 
-        $resolvedCount = 0
         foreach ($item in $Items) {
             $itemIdentifiers = Get-PropertyValue -Object $item -Name 'identifiers'
             if (-not $itemIdentifiers) { continue }
@@ -615,15 +614,12 @@ function Get-AsinMapByJanBatch {
 
             $asin = [string](Get-PropertyValue -Object $item -Name 'asin')
             if ($matchedIdentifier -and -not [string]::IsNullOrWhiteSpace($asin)) {
-                if (-not $TargetMap[$matchedIdentifier]) {
-                    $resolvedCount++
-                }
                 $TargetMap[$matchedIdentifier] = $asin
                 $TargetErrorClassMap.Remove($matchedIdentifier) | Out-Null
             }
         }
 
-        return $resolvedCount
+        return
     }
 
     while ($index -lt $Jans.Count) {
@@ -671,9 +667,8 @@ function Get-AsinMapByJanBatch {
         & $applyCatalogItems -Items $res.items -TargetMap $resultMap -TargetErrorClassMap $errorClassMap | Out-Null
 
         $unresolvedJans = @($chunk | Where-Object { -not $resultMap[$_] })
+        Write-Log -Message "EANフォールバック件数: $($unresolvedJans.Count)件 (index=$index)" -LogPath $LogPath
         if ($unresolvedJans.Count -gt 0) {
-            Write-Log -Message "EANフォールバック件数: $($unresolvedJans.Count)件 (index=$index)" -LogPath $LogPath
-
             $eanIdentifiers = ($unresolvedJans | ForEach-Object { $_.Trim() }) -join ','
             $eanUri = "$($Config.SpApiBaseUrl)/catalog/2022-04-01/items?identifiers=$([Uri]::EscapeDataString($eanIdentifiers))&identifiersType=EAN&marketplaceIds=$($Config.MarketplaceId)"
 
