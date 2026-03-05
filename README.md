@@ -135,6 +135,9 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 - 実行ログ: `logs/run.log`
 - 実行メトリクス(JSONL): `logs/metrics.jsonl`
 - API失敗時の分類（NotFound/Validation, RateLimit/Server, Other）や件数統計を出力
+- 最終サマリに `一時エラー件数` と `未解決件数` を出力
+  - `一時エラー件数`: `RateLimit/Server` と `Other` のうち再試行対象になり得る一時的失敗件数（当該行は空欄で継続）
+  - `未解決件数`: `NotFound/Validation + RateLimit/Server + Other` の合計件数（最終的に解決できず空欄出力になった件数）
 - レート制限関連では `x-amzn-RateLimit-Limit` / `Retry-After` をログに残し、運用時の上限把握に利用
 - 終了時に `input_rows / unique_asin / pricing_calls / pricing_reduction_pct / http429_count / avg_wait_sec` を出力
 
@@ -216,3 +219,4 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 - 429/503 が増える場合は、バッチサイズを自動で 20→10→5 と段階縮小して成功率を優先します。
 - 件数が多い場合は実行時間が伸びるため、更新バッチを分けると切り分けしやすくなります。
 - 定期運用前に、少件数データで `output.xlsx` と `logs/run.log` の内容を一度確認することを推奨します。
+- 実行後は `logs/run.log` の終了メトリクスで `unique_asin` と `pricing_calls` がどちらも 0 以外であることを確認してください。
