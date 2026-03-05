@@ -12,12 +12,27 @@ if errorlevel 1 (
   exit /b 1
 )
 
-echo.
-echo [OK] PS7 インストーラーのダウンロードが完了しました。
-echo [NEXT] インストールを開始します。
-call "%~dp0run_install_ps7.bat"
-if errorlevel 1 (
+set "MSI_FILE="
+for /f "delims=" %%F in ('dir /b /a:-d /o-d "installers\PowerShell-*-win-*.msi" 2^>nul') do (
+  if not defined MSI_FILE set "MSI_FILE=installers\%%F"
+)
+
+if not defined MSI_FILE (
+  echo.
+  echo [ERROR] PS7 installer MSI was not found under installers\.
   exit /b 1
 )
 
+echo.
+echo Installing: %MSI_FILE%
+msiexec /i "%MSI_FILE%" /passive /norestart ADD_PATH=1
+if errorlevel 1 (
+  echo.
+  echo [ERROR] PowerShell 7 installation failed. Please run MSI manually.
+  exit /b 1
+)
+
+echo.
+echo [OK] PowerShell 7 download and installation completed.
+echo [NEXT] Close and reopen terminal, then run: pwsh -v
 exit /b 0
