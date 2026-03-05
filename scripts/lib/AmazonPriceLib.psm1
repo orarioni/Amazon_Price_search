@@ -849,14 +849,27 @@ function Get-AsinMapByJanBatch {
             [object]$Items,
             [hashtable]$TargetMap,
             [hashtable]$TargetErrorClassMap,
-            [hashtable]$TargetJanLookupMap
+            [hashtable]$TargetJanLookupMap,
+            [hashtable]$ParseStats
         )
 
         if (-not $Items) { return }
 
+        if ($ParseStats) {
+            if (-not $ParseStats.ContainsKey('ExpandedItems')) { $ParseStats.ExpandedItems = 0 }
+            if (-not $ParseStats.ContainsKey('ItemsWithoutIdentifiers')) { $ParseStats.ItemsWithoutIdentifiers = 0 }
+            if (-not $ParseStats.ContainsKey('IdentifierCandidates')) { $ParseStats.IdentifierCandidates = 0 }
+            if (-not $ParseStats.ContainsKey('MatchedIdentifiers')) { $ParseStats.MatchedIdentifiers = 0 }
+            if (-not $ParseStats.ContainsKey('ItemsWithAsin')) { $ParseStats.ItemsWithAsin = 0 }
+        }
+
         foreach ($item in (Expand-CatalogItems -Items $Items)) {
+            if ($ParseStats) { $ParseStats.ExpandedItems++ }
             $itemIdentifiers = Get-PropertyValue -Object $item -Name 'identifiers'
-            if (-not $itemIdentifiers) { continue }
+            if (-not $itemIdentifiers) {
+                if ($ParseStats) { $ParseStats.ItemsWithoutIdentifiers++ }
+                continue
+            }
 
             $identifierGroups = @()
             $nestedGroups = Get-PropertyValue -Object $itemIdentifiers -Name 'identifiers'
@@ -892,8 +905,10 @@ function Get-AsinMapByJanBatch {
                         $identifierValue = [string](Get-PropertyValue -Object $leaf -Name 'value')
                     }
                     if (($identifierType -in @('JAN', 'EAN', 'UPC', 'GTIN')) -and -not [string]::IsNullOrWhiteSpace($identifierValue)) {
+                        if ($ParseStats) { $ParseStats.IdentifierCandidates++ }
                         $matchedOriginalJan = Find-TargetJanByIdentifier -Identifier $identifierValue -JanLookupMap $TargetJanLookupMap
                         if ($matchedOriginalJan) {
+                            if ($ParseStats) { $ParseStats.MatchedIdentifiers++ }
                             $matchedIdentifier = $matchedOriginalJan
                             break
                         }
@@ -904,6 +919,7 @@ function Get-AsinMapByJanBatch {
 
             $asin = [string](Get-PropertyValue -Object $item -Name 'asin')
             if ($matchedIdentifier -and -not [string]::IsNullOrWhiteSpace($asin)) {
+                if ($ParseStats) { $ParseStats.ItemsWithAsin++ }
                 $TargetMap[$matchedIdentifier] = $asin
                 $TargetErrorClassMap.Remove($matchedIdentifier) | Out-Null
             }
@@ -916,6 +932,7 @@ function Get-AsinMapByJanBatch {
         $end = [Math]::Min($index + $batchSize - 1, $Jans.Count - 1)
         $chunk = @($Jans[$index..$end])
         $chunkJanLookupMap = @{}
+        $chunkParseStats = @{}
         foreach ($jan in $chunk) {
             $resultMap[$jan] = $null
             foreach ($lookupKey in (Get-IdentifierMatchKeys -Identifier ([string]$jan))) {
@@ -963,9 +980,12 @@ function Get-AsinMapByJanBatch {
         }
 
         $catalogItems = Get-PropertyValue -Object $res -Name 'items'
-        & $applyCatalogItems -Items $catalogItems -TargetMap $resultMap -TargetErrorClassMap $errorClassMap -TargetJanLookupMap $chunkJanLookupMap | Out-Null
+        & $applyCatalogItems -Items $catalogItems -TargetMap $resultMap -TargetErrorClassMap $errorClassMap -TargetJanLookupMap $chunkJanLookupMap -ParseStats $chunkParseStats | Out-Null
 
         $unresolvedJans = @($chunk | Where-Object { -not $resultMap[$_] })
+        if ($chunkParseStats.Count -gt 0) {
+            Write-Log -Message "Catalog parse stats: index=$index size=$($chunk.Count) expanded=$($chunkParseStats.ExpandedItems) withoutIdentifiers=$($chunkParseStats.ItemsWithoutIdentifiers) identifierCandidates=$($chunkParseStats.IdentifierCandidates) matchedIdentifiers=$($chunkParseStats.MatchedIdentifiers) itemsWithAsin=$($chunkParseStats.ItemsWithAsin) unresolved=$($unresolvedJans.Count)" -LogPath $LogPath
+        }
         if ($unresolvedJans.Count -eq $chunk.Count) {
             $sampleText = Get-CatalogIdentifierSampleText -Items $catalogItems
             $numberOfResults = Get-PropertyValue -Object $res -Name 'numberOfResults'
@@ -996,7 +1016,7 @@ function Get-AsinMapByJanBatch {
             }
 
             if ($eanRes) {
-                & $applyCatalogItems -Items $eanRes.items -TargetMap $resultMap -TargetErrorClassMap $errorClassMap -TargetJanLookupMap $chunkJanLookupMap | Out-Null
+                & $applyCatalogItems -Items $eanRes.items -TargetMap $resultMap -TargetErrorClassMap $errorClassMap -TargetJanLookupMap $chunkJanLookupMap -ParseStats $chunkParseStats | Out-Null
             }
             elseif ($eanAttemptDetail) {
                 foreach ($jan in $unresolvedJans) {
