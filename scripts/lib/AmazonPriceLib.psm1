@@ -697,7 +697,7 @@ function Get-AsinMapByJanBatch {
                 foreach ($leaf in $leafIdentifiers) {
                     $identifierType = [string](Get-PropertyValue -Object $leaf -Name 'identifierType')
                     $identifierValue = [string](Get-PropertyValue -Object $leaf -Name 'identifier')
-                    if (($identifierType -in @('JAN', 'EAN')) -and -not [string]::IsNullOrWhiteSpace($identifierValue)) {
+                    if ($identifierType -eq 'JAN' -and -not [string]::IsNullOrWhiteSpace($identifierValue)) {
                         $normalizedIdentifier = $identifierValue.Trim()
                         if ($TargetMap.ContainsKey($normalizedIdentifier)) {
                             $matchedIdentifier = $normalizedIdentifier
@@ -761,40 +761,6 @@ function Get-AsinMapByJanBatch {
         }
 
         & $applyCatalogItems -Items $res.items -TargetMap $resultMap -TargetErrorClassMap $errorClassMap | Out-Null
-
-        $unresolvedJans = @($chunk | Where-Object { -not $resultMap[$_] })
-        Write-Log -Message "EANフォールバック件数: $($unresolvedJans.Count)件 (index=$index)" -LogPath $LogPath
-        if ($unresolvedJans.Count -gt 0) {
-            $eanIdentifiers = ($unresolvedJans | ForEach-Object { $_.Trim() }) -join ','
-            $eanUri = "$($Config.SpApiBaseUrl)/catalog/2022-04-01/items?identifiers=$([Uri]::EscapeDataString($eanIdentifiers))&identifiersType=EAN&marketplaceIds=$($Config.MarketplaceId)"
-
-            $eanRes = $null
-            $eanAttemptDetail = $null
-            try {
-                $eanRes = Invoke-SpApiRequest -Endpoint "CatalogBatchEanFallback(index=$index,size=$($unresolvedJans.Count))" -Method 'Get' -Uri $eanUri -Headers (New-SpApiHeaders -AccessToken $AccessToken -Config $Config) -Config $Config -LogPath $LogPath
-            }
-            catch {
-                $eanAttemptDetail = Get-ErrorDetail -ErrorRecord $_
-                if ($eanAttemptDetail.Class -eq 'Auth' -and $AuthContext) {
-                    try {
-                        $AccessToken = Get-LwaAccessTokenCached -ClientId $AuthContext.ClientId -ClientSecret $AuthContext.ClientSecret -RefreshToken $AuthContext.RefreshToken -Config $Config -LogPath $LogPath -TokenCachePath $AuthContext.TokenCachePath -ForceRefresh
-                        $eanRes = Invoke-SpApiRequest -Endpoint "CatalogBatchEanFallbackAuthRetry(index=$index,size=$($unresolvedJans.Count))" -Method 'Get' -Uri $eanUri -Headers (New-SpApiHeaders -AccessToken $AccessToken -Config $Config) -Config $Config -LogPath $LogPath
-                    }
-                    catch {
-                        $eanAttemptDetail = Get-ErrorDetail -ErrorRecord $_
-                    }
-                }
-            }
-
-            if ($eanRes) {
-                & $applyCatalogItems -Items $eanRes.items -TargetMap $resultMap -TargetErrorClassMap $errorClassMap | Out-Null
-            }
-            elseif ($eanAttemptDetail) {
-                foreach ($jan in $unresolvedJans) {
-                    $errorClassMap[$jan] = $eanAttemptDetail.Class
-                }
-            }
-        }
 
         foreach ($jan in $chunk) {
             if (-not $resultMap[$jan] -and -not $errorClassMap.ContainsKey($jan)) {
