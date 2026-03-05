@@ -31,6 +31,7 @@
   Excelが開いたままの可能性があります。Excelをすべて閉じて再実行してください。
 - invalid_grant:
   refresh_token の期限切れ/誤入力の可能性があります。run_init.bat で認証情報を再登録してください。
+- run_prepare_ps7_installer.bat 実行時に ParserError（The string is missing the terminator）が出る場合は、最新版を再取得してください（本不具合を修正済み）。
 
 
 ■ 補足
