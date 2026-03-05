@@ -171,7 +171,7 @@ function Get-CatalogIdentifierSampleText {
                 }
                 if ([string]::IsNullOrWhiteSpace($identifierValue)) { continue }
 
-                $samples.Add("$identifierType:$identifierValue")
+                $samples.Add(("{0}:{1}" -f $identifierType, $identifierValue))
                 if ($samples.Count -ge 5) {
                     return ($samples -join ';')
                 }
