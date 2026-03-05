@@ -820,44 +820,11 @@ function Get-AsinMapByJanBatch {
         & $applyCatalogItems -Items $catalogItems -TargetMap $resultMap -TargetErrorClassMap $errorClassMap | Out-Null
 
         $unresolvedJans = @($chunk | Where-Object { -not $resultMap[$_] })
-        Write-Log -Message "EANフォールバック件数: $($unresolvedJans.Count)件 (index=$index)" -LogPath $LogPath
-        if ($unresolvedJans.Count -gt 0) {
-            $eanIdentifiers = ($unresolvedJans | ForEach-Object { $_.Trim() }) -join ','
-            $eanUri = "$($Config.SpApiBaseUrl)/catalog/2022-04-01/items?identifiers=$([Uri]::EscapeDataString($eanIdentifiers))&identifiersType=EAN&includedData=identifiers&marketplaceIds=$($Config.MarketplaceId)"
-
-            $eanRes = $null
-            $eanAttemptDetail = $null
-            try {
-                $eanRes = Invoke-SpApiRequest -Endpoint "CatalogBatchEanFallback(index=$index,size=$($unresolvedJans.Count))" -Method 'Get' -Uri $eanUri -Headers (New-SpApiHeaders -AccessToken $AccessToken -Config $Config) -Config $Config -LogPath $LogPath
-            }
-            catch {
-                $eanAttemptDetail = Get-ErrorDetail -ErrorRecord $_
-                if ($eanAttemptDetail.Class -eq 'Auth' -and $AuthContext) {
-                    try {
-                        $AccessToken = Get-LwaAccessTokenCached -ClientId $AuthContext.ClientId -ClientSecret $AuthContext.ClientSecret -RefreshToken $AuthContext.RefreshToken -Config $Config -LogPath $LogPath -TokenCachePath $AuthContext.TokenCachePath -ForceRefresh
-                        $eanRes = Invoke-SpApiRequest -Endpoint "CatalogBatchEanFallbackAuthRetry(index=$index,size=$($unresolvedJans.Count))" -Method 'Get' -Uri $eanUri -Headers (New-SpApiHeaders -AccessToken $AccessToken -Config $Config) -Config $Config -LogPath $LogPath
-                    }
-                    catch {
-                        $eanAttemptDetail = Get-ErrorDetail -ErrorRecord $_
-                    }
-                }
-            }
-
-            if ($eanRes) {
-                $eanItems = @(& $resolveCatalogItems -Response $eanRes)
-                Write-Log -Message "Catalog EAN応答items件数: $($eanItems.Count) (index=$index)" -LogPath $LogPath
-                & $applyCatalogItems -Items $eanItems -TargetMap $resultMap -TargetErrorClassMap $errorClassMap | Out-Null
-            }
-            elseif ($eanAttemptDetail) {
-                foreach ($jan in $unresolvedJans) {
-                    $errorClassMap[$jan] = $eanAttemptDetail.Class
-                }
-            }
-        }
+        Write-Log -Message "JANバッチ後の未解決件数: $($unresolvedJans.Count)件 (index=$index)" -LogPath $LogPath
 
         $finalUnresolvedJans = @($chunk | Where-Object { -not $resultMap[$_] })
         if ($finalUnresolvedJans.Count -gt 0) {
-            Write-Log -Message "Catalog単発フォールバック件数: $($finalUnresolvedJans.Count)件 (index=$index)" -LogPath $LogPath -Level 'WARN'
+            Write-Log -Message "Catalog単発(JAN)フォールバック件数: $($finalUnresolvedJans.Count)件 (index=$index)" -LogPath $LogPath -Level 'WARN'
             foreach ($jan in $finalUnresolvedJans) {
                 $asinFromJan = & $resolveAsinBySingleIdentifier -Identifier $jan -IdentifiersType 'JAN'
                 if ($asinFromJan) {
@@ -866,12 +833,6 @@ function Get-AsinMapByJanBatch {
                     continue
                 }
 
-                $asinFromEan = & $resolveAsinBySingleIdentifier -Identifier $jan -IdentifiersType 'EAN'
-                if ($asinFromEan) {
-                    $resultMap[$jan] = $asinFromEan
-                    $errorClassMap.Remove($jan) | Out-Null
-                    continue
-                }
             }
         }
 
