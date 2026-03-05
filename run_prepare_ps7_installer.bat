@@ -13,5 +13,6 @@ if errorlevel 1 (
 )
 
 echo.
-echo [OK] PS7 インストーラーの準備が完了しました。
+echo [OK] PS7 インストーラーのダウンロードが完了しました。
+echo [NEXT] MSI を手動実行するか run_install_ps7.bat を実行してください。
 exit /b 0

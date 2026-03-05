@@ -38,13 +38,15 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 ## 初回セットアップ（1回だけ）
 
 1. Excel をすべて閉じる
-2. （未導入PCのみ）`run_prepare_ps7_installer.bat` を実行し、`installers/` の MSI を使って PowerShell 7 をインストール
-3. リポジトリ直下で `run_init.bat` を実行（ダブルクリック可）
-4. プロンプトに従って以下を入力
+2. （未導入PCのみ）`run_prepare_ps7_installer.bat` で MSI をダウンロード
+3. `run_install_ps7.bat` を実行（または `installers/` の MSI を手動実行）
+4. ターミナルを開き直し、`pwsh -v` で確認
+5. リポジトリ直下で `run_init.bat` を実行（ダブルクリック可）
+6. プロンプトに従って以下を入力
    - `client_id`
    - `client_secret`
    - `refresh_token`
-5. `secrets/lwa_secrets.xml` 作成メッセージを確認
+7. `secrets/lwa_secrets.xml` 作成メッセージを確認
 
 `run_init.bat` は内部で `scripts/00_init_secrets.ps1` を呼び出し、認証情報を保存します。
 
@@ -201,7 +203,8 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 
 ## ディレクトリ構成（主要）
 
-- `run_prepare_ps7_installer.bat` : 上司PC向け PowerShell 7 インストーラー取得
+- `run_prepare_ps7_installer.bat` : 上司PC向け PowerShell 7 インストーラー取得（ダウンロード）
+- `run_install_ps7.bat` : ダウンロード済み MSI から PowerShell 7 をインストール
 - `run_init.bat` : 初期認証情報登録の起動（pwsh 実行）
 - `run_update.bat` : 更新処理の起動（pwsh 実行）
 - `config.psd1` : 環境設定（マーケットプレイス、TTL、各パス等）

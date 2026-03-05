@@ -13,7 +13,7 @@ if not defined PS7_EXE for %%I in (pwsh.exe) do set "PS7_EXE=%%~$PATH:I"
 if not defined PS7_EXE (
   echo.
   echo [ERROR] PowerShell 7 / pwsh was not found.
-  echo [HINT] Run run_prepare_ps7_installer.bat first, then install PowerShell 7.
+  echo [HINT] Run run_prepare_ps7_installer.bat, then install MSI (or run run_install_ps7.bat).
   exit /b 1
 )
 
