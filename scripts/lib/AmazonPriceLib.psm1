@@ -1096,7 +1096,7 @@ function Invoke-AmazonPriceUpdate {
         $persistentCache = Import-PersistentCache -Path $cachePath -LogPath $logPath
         $runCache = @{}
         $processed = 0
-        $errorCount = 0
+        $transientErrorCount = 0
         $cacheHitCount = 0
         $cacheMissCount = 0
         $catalogApiCalls = 0
@@ -1180,10 +1180,10 @@ function Invoke-AmazonPriceUpdate {
                         $cacheStatus = 'not_found'; $notFoundValidationCount++
                     }
                     elseif ($catalogErrorMap.ContainsKey($jan) -and $catalogErrorMap[$jan] -eq 'RateLimit/Server') {
-                        $cacheStatus = 'transient_error'; $rateLimitServerCount++; $errorCount++
+                        $cacheStatus = 'transient_error'; $rateLimitServerCount++; $transientErrorCount++
                     }
                     elseif ($catalogErrorMap.ContainsKey($jan)) {
-                        $cacheStatus = 'transient_error'; $otherErrorCount++; $errorCount++
+                        $cacheStatus = 'transient_error'; $otherErrorCount++; $transientErrorCount++
                     }
                     else {
                         $cacheStatus = 'not_found'; $notFoundValidationCount++
@@ -1197,10 +1197,10 @@ function Invoke-AmazonPriceUpdate {
                             $cacheStatus = 'not_found'; $notFoundValidationCount++
                         }
                         elseif ($errClass -eq 'RateLimit/Server') {
-                            $cacheStatus = 'transient_error'; $rateLimitServerCount++; $errorCount++
+                            $cacheStatus = 'transient_error'; $rateLimitServerCount++; $transientErrorCount++
                         }
                         else {
-                            $cacheStatus = 'transient_error'; $otherErrorCount++; $errorCount++
+                            $cacheStatus = 'transient_error'; $otherErrorCount++; $transientErrorCount++
                         }
                     }
                 }
@@ -1265,10 +1265,9 @@ function Invoke-AmazonPriceUpdate {
             }
             catch {
                 $detail = Get-ErrorDetail -ErrorRecord $_
-                $errorCount++
                 if ($detail.Class -eq 'NotFound/Validation') { $notFoundValidationCount++ }
-                elseif ($detail.Class -eq 'RateLimit/Server') { $rateLimitServerCount++ }
-                else { $otherErrorCount++ }
+                elseif ($detail.Class -eq 'RateLimit/Server') { $rateLimitServerCount++; $transientErrorCount++ }
+                else { $otherErrorCount++; $transientErrorCount++ }
 
                 $sheet.Cells.Item($row, 7).Value2 = ''
                 $sheet.Cells.Item($row, 8).Value2 = ''
@@ -1299,8 +1298,9 @@ function Invoke-AmazonPriceUpdate {
         $metricsPath = Join-Path $logDir 'metrics.jsonl'
         $metricsRecord = [PSCustomObject]@{ ts=(Get-Date).ToString('o'); input_rows=$totalDataRows; unique_jan=$($janList.Count); unique_asin=$uniqueAsinCount; pricing_calls=$pricingApiCalls; pricing_reduction_pct=$pricingReductionPct; api_total_calls=$($script:RunStats.TotalApiCalls); retry_count=$($script:RunStats.RetryCount); http429_count=$($script:RunStats.Http429Count); total_wait_sec=[Math]::Round($script:RunStats.TotalWaitSec,2); avg_wait_sec=$avgWait }
         Add-Content -Path $metricsPath -Value ($metricsRecord | ConvertTo-Json -Compress -Depth 5) -Encoding UTF8
+        $totalUnresolvedCount = $notFoundValidationCount + $rateLimitServerCount + $otherErrorCount
         Write-Log -Message "エラー分類統計: NotFound/Validation=$notFoundValidationCount, RateLimit/Server=$rateLimitServerCount, Other=$otherErrorCount" -LogPath $logPath
-        Write-Log -Message "更新完了: 処理件数=$processed, エラー件数=$errorCount, 出力=$outputPath" -LogPath $logPath
+        Write-Log -Message "更新完了: 処理件数=$processed, 一時エラー件数=$transientErrorCount, 未解決件数=$totalUnresolvedCount, 出力=$outputPath" -LogPath $logPath
     }
     finally {
         Write-Progress -Activity 'Excel出力処理' -Completed
