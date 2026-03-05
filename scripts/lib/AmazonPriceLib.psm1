@@ -165,7 +165,7 @@ function Write-SpApiResponseDebugLog {
         }
 
         $label = if ($maxChars -gt 0) { "$Endpoint debug.full(max=$maxChars)" } else { "$Endpoint debug.full(max=unlimited)" }
-        Write-Log -Message "$label: $snippet" -LogPath $LogPath
+        Write-Log -Message "$($label): $snippet" -LogPath $LogPath
     }
 }
 
