@@ -76,6 +76,63 @@ function Get-PropertyValue {
     return $property.Value
 }
 
+
+function ConvertTo-ObjectArray {
+    param([object]$Value)
+
+    if ($null -eq $Value) { return @() }
+    if ($Value -is [string]) { return @($Value) }
+    if ($Value -is [System.Array]) { return @($Value) }
+    if ($Value -is [System.Collections.IList]) { return @($Value) }
+    if ($Value -is [System.Collections.IEnumerable]) {
+        return @($Value)
+    }
+
+    return @($Value)
+}
+
+function Get-ObjectTypeName {
+    param([object]$Value)
+
+    if ($null -eq $Value) { return '<null>' }
+
+    try {
+        return $Value.GetType().FullName
+    }
+    catch {
+        return '<unknown>'
+    }
+}
+
+function Write-SpApiResponseShapeLog {
+    param(
+        [string]$Endpoint,
+        [object]$Response,
+        [string]$LogPath
+    )
+
+    if ($null -eq $Response) {
+        Write-Log -Message "$Endpoint response-shape: <null>" -LogPath $LogPath -Level 'WARN'
+        return
+    }
+
+    $responseType = $Response.GetType().FullName
+    $topProperties = @($Response.PSObject.Properties.Name)
+    $topPropertyText = if ($topProperties.Count -gt 0) { ($topProperties -join ',') } else { '<none>' }
+
+    $items = Get-PropertyValue -Object $Response -Name 'items'
+    $responses = Get-PropertyValue -Object $Response -Name 'responses'
+    $payload = Get-PropertyValue -Object $Response -Name 'payload'
+    $errors = Get-PropertyValue -Object $Response -Name 'errors'
+
+    $itemsCount = if ($items) { @($items).Count } else { 0 }
+    $responsesCount = if ($responses) { @($responses).Count } else { 0 }
+    $errorCount = if ($errors) { @($errors).Count } else { 0 }
+    $hasPayload = $null -ne $payload
+
+    Write-Log -Message "$Endpoint response-shape: type=$responseType props=[$topPropertyText] items.count=$itemsCount responses.count=$responsesCount errors.count=$errorCount hasPayload=$hasPayload" -LogPath $LogPath -Level 'WARN'
+}
+
 function Mask-SensitiveText {
     param([string]$Text)
 
@@ -122,9 +179,11 @@ function Write-SpApiResponseDebugLog {
 
     $shouldLogFull = $false
 
-    if ($Response -and $Response.responses) {
+    $batchResponses = Get-PropertyValue -Object $Response -Name 'responses'
+    if ($batchResponses) {
         $index = 0
-        foreach ($item in $Response.responses) {
+        $batchResponsesArray = @($batchResponses)
+        foreach ($item in $batchResponsesArray) {
             $index++
             $status = Get-PropertyValue -Object $item -Name 'status'
             $request = Get-PropertyValue -Object $item -Name 'request'
@@ -137,7 +196,7 @@ function Write-SpApiResponseDebugLog {
             $offersCount = if ($offers) { @($offers).Count } else { 0 }
             $errorCount = if ($errors) { @($errors).Count } else { 0 }
 
-            Write-Log -Message "$Endpoint debug[$index/$($Response.responses.Count)]: status=$status request.uri=$requestUri payload.ASIN=$asin offers.count=$offersCount errors.count=$errorCount" -LogPath $LogPath
+            Write-Log -Message "$Endpoint debug[$index/$($batchResponsesArray.Count)]: status=$status request.uri=$requestUri payload.ASIN=$asin offers.count=$offersCount errors.count=$errorCount" -LogPath $LogPath
             if (($status -as [int]) -ge 400 -or $errorCount -gt 0) { $shouldLogFull = $true }
         }
     }
@@ -258,7 +317,16 @@ function Invoke-SpApiRequest {
             if ($Endpoint -match '^Pricing') {
                 Update-PricingThrottleFromLimit -RateLimitLimit $limit -Config $Config
             }
-            Write-SpApiResponseDebugLog -Endpoint $Endpoint -Response $res -Config $Config -LogPath $LogPath
+            try {
+                Write-SpApiResponseDebugLog -Endpoint $Endpoint -Response $res -Config $Config -LogPath $LogPath
+            }
+            catch {
+                Write-Log -Message "$Endpoint debug-hook failed: $($_.Exception.GetType().FullName) - $($_.Exception.Message)" -LogPath $LogPath -Level 'WARN'
+                Write-SpApiResponseShapeLog -Endpoint $Endpoint -Response $res -LogPath $LogPath
+                if ($_.ScriptStackTrace) {
+                    Write-Log -Message "$Endpoint debug-hook stack: $($_.ScriptStackTrace)" -LogPath $LogPath -Level 'WARN'
+                }
+            }
             return $res
         }
         catch {
@@ -267,6 +335,13 @@ function Invoke-SpApiRequest {
             if ($status -eq 0) {
                 # log the raw exception for troubleshooting
                 Write-Log -Message "Invoke-SpApiRequest exception: $($_.Exception.GetType().FullName) - $($_.Exception.Message)" -LogPath $LogPath -Level 'WARN'
+                Write-Log -Message "Invoke-SpApiRequest context: endpoint=$Endpoint method=$Method uri=$Uri attempt=$attempt/$maxAttempts" -LogPath $LogPath -Level 'WARN'
+                if ($_.InvocationInfo -and $_.InvocationInfo.PositionMessage) {
+                    Write-Log -Message "Invoke-SpApiRequest location: $($_.InvocationInfo.PositionMessage)" -LogPath $LogPath -Level 'WARN'
+                }
+                if ($_.ScriptStackTrace) {
+                    Write-Log -Message "Invoke-SpApiRequest stack: $($_.ScriptStackTrace)" -LogPath $LogPath -Level 'WARN'
+                }
             }
             if ($status -eq 403) {
                 Write-Log -Message "HTTP 403 exception: $($_.Exception.GetType().FullName) - $($_.Exception.Message)" -LogPath $LogPath -Level 'WARN'
@@ -668,18 +743,18 @@ function Get-AsinMapByJanBatch {
             if (-not $itemIdentifiers) { continue }
 
             $identifierGroups = @()
-            # Catalog Items API の identifiers は配列で返る実装があるため、
-            # 直接配列として扱える場合はそのまま利用する。
-            if ($itemIdentifiers -is [System.Collections.IEnumerable] -and -not ($itemIdentifiers -is [string])) {
-                $identifierGroups = @($itemIdentifiers)
+            $nestedGroups = Get-PropertyValue -Object $itemIdentifiers -Name 'identifiers'
+            if ($nestedGroups) {
+                $identifierGroups = ConvertTo-ObjectArray -Value $nestedGroups
             }
             else {
-                $nestedGroups = Get-PropertyValue -Object $itemIdentifiers -Name 'identifiers'
-                if ($nestedGroups) {
-                    $identifierGroups = @($nestedGroups)
-                }
+                $identifierGroups = ConvertTo-ObjectArray -Value $itemIdentifiers
             }
-            if ($identifierGroups.Count -eq 0) { continue }
+
+            if ($identifierGroups.Count -eq 0) {
+                Write-Log -Message "Catalog identifier parse: empty identifierGroups (item.identifiers.type=$(Get-ObjectTypeName -Value $itemIdentifiers), nested.type=$(Get-ObjectTypeName -Value $nestedGroups))" -LogPath $LogPath -Level 'WARN'
+                continue
+            }
 
             $matchedIdentifier = $null
             foreach ($idGroup in $identifierGroups) {
@@ -688,10 +763,10 @@ function Get-AsinMapByJanBatch {
                 $leafIdentifiers = @()
                 $nestedLeafIdentifiers = Get-PropertyValue -Object $idGroup -Name 'identifiers'
                 if ($nestedLeafIdentifiers) {
-                    $leafIdentifiers = @($nestedLeafIdentifiers)
+                    $leafIdentifiers = ConvertTo-ObjectArray -Value $nestedLeafIdentifiers
                 }
                 else {
-                    $leafIdentifiers = @($idGroup)
+                    $leafIdentifiers = ConvertTo-ObjectArray -Value $idGroup
                 }
 
                 foreach ($leaf in $leafIdentifiers) {
@@ -760,9 +835,13 @@ function Get-AsinMapByJanBatch {
             continue
         }
 
-        & $applyCatalogItems -Items $res.items -TargetMap $resultMap -TargetErrorClassMap $errorClassMap | Out-Null
+        $catalogItems = Get-PropertyValue -Object $res -Name 'items'
+        & $applyCatalogItems -Items $catalogItems -TargetMap $resultMap -TargetErrorClassMap $errorClassMap | Out-Null
 
         $unresolvedJans = @($chunk | Where-Object { -not $resultMap[$_] })
+        if ($unresolvedJans.Count -eq $chunk.Count) {
+            Write-Log -Message "Catalog parse diagnostic: all unresolved in chunk (index=$index,size=$($chunk.Count), response.items.type=$(Get-ObjectTypeName -Value $catalogItems), response.props=$((@($res.PSObject.Properties.Name) -join ',')))" -LogPath $LogPath -Level 'WARN'
+        }
         Write-Log -Message "EANフォールバック件数: $($unresolvedJans.Count)件 (index=$index)" -LogPath $LogPath
         if ($unresolvedJans.Count -gt 0) {
             $eanIdentifiers = ($unresolvedJans | ForEach-Object { $_.Trim() }) -join ','
@@ -958,14 +1037,15 @@ function Get-PriceMapByAsinBatch {
             continue
         }
 
-        if (-not $res.responses) {
+        $responseItems = Get-PropertyValue -Object $res -Name 'responses'
+        if (-not $responseItems) {
             foreach ($asin in $chunk) { $errorClassMap[$asin] = 'Other' }
             $index = $end + 1
             continue
         }
 
         $retryableResponseAsins = New-Object System.Collections.Generic.List[string]
-        foreach ($response in $res.responses) {
+        foreach ($response in @($responseItems)) {
             $statusCode = if ($response.status) { [int]$response.status } else { $null }
 
             $asin = $null
