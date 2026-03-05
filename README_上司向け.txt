@@ -16,7 +16,7 @@
 
 ■ 注意
 - 同じJANが複数行ある場合、API呼び出しは1回だけ行います。
-- JAN/価格の取得はバッチAPIでまとめて実行するため、件数が多いほど更新時間を短縮できます。
+- 価格取得はASINごとの単発APIで順次実行するため、安定性を優先した運用です。
 - cache/price_cache.json に24時間の永続キャッシュを保持し、再実行時のAPI呼び出しを削減します。
 - cache/history/prices_YYYY-MM-DD.jsonl に価格取得成功分の履歴を日次追記します（統計分析向け）。
 - 該当なし（NotFound/Validation）は negative cache として保持し、TTL内は再呼び出ししません。

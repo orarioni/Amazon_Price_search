@@ -234,7 +234,7 @@ function Invoke-SpApiRequest {
         $responseHeaders = $null
         try {
             if ($script:RunStats) { $script:RunStats.TotalApiCalls++ }
-            if ($Endpoint -match '^PricingBatch') { $script:RunStats.PricingBatchCalls++ }
+            if ($Endpoint -match '^Pricing') { $script:RunStats.PricingBatchCalls++ }
             if ($Endpoint -match '^CatalogBatch') { $script:RunStats.CatalogBatchCalls++ }
 
             $params = @{ Method = $Method; Uri = $Uri; Headers = $Headers }
@@ -869,155 +869,19 @@ function Get-PriceMapByAsinBatch {
     $priceMap = @{}
     $errorClassMap = @{}
 
-    $singleThreshold = if ($Config.PricingSingleFallbackThreshold) { [int]$Config.PricingSingleFallbackThreshold } else { 3 }
-    if ($Asins.Count -le $singleThreshold) {
-        Write-Log -Message "ASIN件数=$($Asins.Count) のため Pricing単発APIへフォールバックします。" -LogPath $LogPath
-        foreach ($asin in $Asins) {
-            try {
-                $single = Get-PriceBySingleAsin -Asin $asin -AccessToken $AccessToken -Config $Config -LogPath $LogPath -AuthContext $AuthContext
-                $priceMap[$asin] = $single.Price
-                if ($single.ErrorClass) { $errorClassMap[$asin] = $single.ErrorClass }
-                else { $errorClassMap.Remove($asin) | Out-Null }
-            }
-            catch {
-                $detail = Get-ErrorDetail -ErrorRecord $_
-                $priceMap[$asin] = $null
-                $errorClassMap[$asin] = if ($detail.Class) { $detail.Class } else { 'Other' }
-            }
-        }
-
-        return [PSCustomObject]@{ PriceMap = $priceMap; ErrorClassMap = $errorClassMap }
-    }
-
-    $minBatchSize = 5
-    $batchSize = [Math]::Max($minBatchSize, [int]$Config.PricingBatchSize)
-    $index = 0
-
-    while ($index -lt $Asins.Count) {
-        $end = [Math]::Min($index + $batchSize - 1, $Asins.Count - 1)
-        $chunk = @($Asins[$index..$end])
-        foreach ($asin in $chunk) { $priceMap[$asin] = $null }
-
-        $requests = @()
-        foreach ($asin in $chunk) {
-            $requests += @{ uri = "/products/pricing/v0/items/$([Uri]::EscapeDataString($asin))/offers?MarketplaceId=$($Config.MarketplaceId)&ItemCondition=New"; method = 'GET' }
-        }
-
-        $body = @{ requests = $requests } | ConvertTo-Json -Depth 5
-
-        $res = $null
-        $attemptDetail = $null
+    Write-Log -Message "PricingはバッチAPIを使用せず、ASIN単位で順次取得します。件数=$($Asins.Count)" -LogPath $LogPath
+    foreach ($asin in $Asins) {
         try {
-            Wait-ForPricingSlot -Config $Config
-            $res = Invoke-SpApiRequest -Endpoint "PricingBatch(index=$index,size=$batchSize)" -Method 'Post' -Uri "$($Config.SpApiBaseUrl)/batches/products/pricing/v0/itemOffers" -Headers (New-SpApiHeaders -AccessToken $AccessToken -Config $Config -ContentType 'application/json') -Body $body -Config $Config -LogPath $LogPath
+            $single = Get-PriceBySingleAsin -Asin $asin -AccessToken $AccessToken -Config $Config -LogPath $LogPath -AuthContext $AuthContext
+            $priceMap[$asin] = $single.Price
+            if ($single.ErrorClass) { $errorClassMap[$asin] = $single.ErrorClass }
+            else { $errorClassMap.Remove($asin) | Out-Null }
         }
         catch {
-            $attemptDetail = Get-ErrorDetail -ErrorRecord $_
-            if ($attemptDetail.Class -eq 'Auth' -and $AuthContext) {
-                try {
-                    $AccessToken = Get-LwaAccessTokenCached -ClientId $AuthContext.ClientId -ClientSecret $AuthContext.ClientSecret -RefreshToken $AuthContext.RefreshToken -Config $Config -LogPath $LogPath -TokenCachePath $AuthContext.TokenCachePath -ForceRefresh
-                    Wait-ForPricingSlot -Config $Config
-                    $res = Invoke-SpApiRequest -Endpoint "PricingBatchAuthRetry(index=$index,size=$batchSize)" -Method 'Post' -Uri "$($Config.SpApiBaseUrl)/batches/products/pricing/v0/itemOffers" -Headers (New-SpApiHeaders -AccessToken $AccessToken -Config $Config -ContentType 'application/json') -Body $body -Config $Config -LogPath $LogPath
-                }
-                catch {
-                    $attemptDetail = Get-ErrorDetail -ErrorRecord $_
-                }
-            }
+            $detail = Get-ErrorDetail -ErrorRecord $_
+            $priceMap[$asin] = $null
+            $errorClassMap[$asin] = if ($detail.Class) { $detail.Class } else { 'Other' }
         }
-
-        if (-not $res) {
-            if ($attemptDetail -and $attemptDetail.Class -eq 'RateLimit/Server' -and $batchSize -gt $minBatchSize) {
-                $nextBatchSize = [Math]::Max($minBatchSize, [int][Math]::Floor($batchSize / 2))
-                Write-Log -Message "Pricingバッチを縮小します: $batchSize -> $nextBatchSize (index=$index, HTTP=$($attemptDetail.StatusCode), limit=$($attemptDetail.RateLimitLimit))" -LogPath $LogPath -Level 'WARN'
-                $batchSize = $nextBatchSize
-                continue
-            }
-
-            if ($chunk.Count -le $singleThreshold) {
-                Write-Log -Message "Pricingバッチ失敗のため単発APIへフォールバックします (index=$index,size=$($chunk.Count))。" -LogPath $LogPath -Level 'WARN'
-                foreach ($asin in $chunk) {
-                    try {
-                        $single = Get-PriceBySingleAsin -Asin $asin -AccessToken $AccessToken -Config $Config -LogPath $LogPath -AuthContext $AuthContext
-                        $priceMap[$asin] = $single.Price
-                        if ($single.ErrorClass) { $errorClassMap[$asin] = $single.ErrorClass }
-                        else { $errorClassMap.Remove($asin) | Out-Null }
-                    }
-                    catch {
-                        $detail = Get-ErrorDetail -ErrorRecord $_
-                        $errorClassMap[$asin] = if ($detail.Class) { $detail.Class } else { 'Other' }
-                    }
-                }
-                $index = $end + 1
-                continue
-            }
-
-            foreach ($asin in $chunk) {
-                $errorClassMap[$asin] = if ($attemptDetail) { $attemptDetail.Class } else { 'Other' }
-            }
-            $index = $end + 1
-            continue
-        }
-
-        if (-not $res.responses) {
-            foreach ($asin in $chunk) { $errorClassMap[$asin] = 'Other' }
-            $index = $end + 1
-            continue
-        }
-
-        $retryableResponseAsins = New-Object System.Collections.Generic.List[string]
-        foreach ($response in $res.responses) {
-            $statusCode = if ($response.status) { [int]$response.status } else { $null }
-
-            $asin = $null
-            if ($response.body -and $response.body.payload -and $response.body.payload.ASIN) {
-                $asin = [string]$response.body.payload.ASIN
-            }
-            elseif ($response.request -and $response.request.uri) {
-                if ($response.request.uri -match '/items/([^/]+)/offers') {
-                    $asin = [Uri]::UnescapeDataString($matches[1])
-                }
-            }
-
-            if (-not $asin -or -not $priceMap.ContainsKey($asin)) { continue }
-
-            if ($statusCode -ge 400) {
-                $bodyText = if ($response.body) { ($response.body | ConvertTo-Json -Depth 8) } else { '' }
-                $detail = Get-StatusClassification -StatusCode $statusCode -BodyText $bodyText
-                $errorClassMap[$asin] = $detail.Class
-                if ($statusCode -eq 429 -or $statusCode -eq 500 -or $statusCode -eq 503) {
-                    $retryableResponseAsins.Add($asin) | Out-Null
-                }
-                continue
-            }
-
-            $offers = $response.body.payload.Offers
-            $priceMap[$asin] = Get-LowestNewPriceFromOffers -Offers $offers
-            if ($null -eq $priceMap[$asin]) {
-                $errorClassMap[$asin] = 'NotFound/Validation'
-            }
-            else {
-                $errorClassMap.Remove($asin) | Out-Null
-            }
-        }
-
-        if ($retryableResponseAsins.Count -gt 0) {
-            $retryAsins = @($retryableResponseAsins | Sort-Object -Unique)
-            Write-Log -Message "Pricing部分失敗ASINを単発再試行します: count=$($retryAsins.Count)" -LogPath $LogPath -Level 'WARN'
-            foreach ($asin in $retryAsins) {
-                try {
-                    $single = Get-PriceBySingleAsin -Asin $asin -AccessToken $AccessToken -Config $Config -LogPath $LogPath -AuthContext $AuthContext
-                    $priceMap[$asin] = $single.Price
-                    if ($single.ErrorClass) { $errorClassMap[$asin] = $single.ErrorClass }
-                    else { $errorClassMap.Remove($asin) | Out-Null }
-                }
-                catch {
-                    $detail = Get-ErrorDetail -ErrorRecord $_
-                    $errorClassMap[$asin] = if ($detail.Class) { $detail.Class } else { 'Other' }
-                }
-            }
-        }
-
-        $index = $end + 1
     }
 
     [PSCustomObject]@{ PriceMap = $priceMap; ErrorClassMap = $errorClassMap }
