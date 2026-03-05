@@ -7,8 +7,6 @@
     RetryMaxAttempts   = 6
     RetryMaxWaitSec    = 120
     CatalogBatchSize  = 20
-    PricingBatchSize  = 20
-    PricingSingleFallbackThreshold = 3
     PricingMinIntervalSec = 2.2
     DebugSpApiResponse = $false
     DebugSpApiResponseMaxChars = 4000

@@ -56,7 +56,7 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 2. Excel を閉じる
 3. `run_update.bat` を実行
 4. `data/output.xlsx` を確認
-   - 実行中はコンソールに `進捗: 現在件数 / 入力件数` を表示します（約10行ごと）。
+   - 実行中はコンソールに `進捗: 現在件数 / 入力件数` を表示します（50行ごと）。
 
 `run_update.bat` は内部で `scripts/10_update_excel.ps1` を実行します。
 
@@ -84,6 +84,24 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 - 該当商品なし（NotFound/Validation）は G/H/I を空欄化
 - 一時エラー（RateLimit/Server など）は当該行のみ空欄で継続（全体停止しない）
 
+
+## 取得〜output までの依存関係（実装順）
+
+更新処理（`Invoke-AmazonPriceUpdate`）では、次の依存順でデータを確定します。
+
+1. **入力収集**: `input.xlsx` の B列から JAN を収集（重複JANは集約）
+2. **JANキャッシュ判定**: `cache/price_cache.json` の JAN→ASIN エントリを TTL 判定
+3. **Catalog API**: 未解決JANのみ `Get-AsinMapByJanBatch` で ASIN 解決
+4. **Offerキャッシュ判定**: ASINごとに Offer キャッシュを TTL 判定
+5. **Pricing API（単発）**: 未解決ASINのみ `Get-PriceBySingleAsin` を順次呼び出し
+6. **runCache確定**: JAN単位で `asin / price / fetched_at / cache_status` を確定
+7. **Excel反映**: runCache をもとに G/H/I 列へ出力
+8. **永続化**: `cache/price_cache.json` と `cache/history/prices_YYYY-MM-DD.jsonl` を更新
+9. **保存**: `data/output.xlsx` に SaveAs して終了メトリクスをログ出力
+
+この順序により、**ASINや価格が未確定のまま output へ反映されない**ように依存関係を固定しています。
+
+---
 
 ### 「最安」の定義（運用ルール）
 
@@ -199,6 +217,13 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 
 ---
 
+## 関数依存関係ドキュメント
+
+- 全関数の依存関係は `docs/FUNCTION_DEPENDENCIES.md` に整理しています。
+- 依存関係の棚卸し・影響範囲確認時はこのドキュメントを参照してください。
+
+---
+
 ## ディレクトリ構成（主要）
 
 - `run_init.bat` : 初期認証情報登録の起動
@@ -218,7 +243,7 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 
 - API呼び出し回数を抑えるため、同一JANは自動で集約処理されます。
 - Pricing呼び出しは基本直列で、最小間隔を保ちながら動的スロットリングします。
-- 429/503 が増える場合は、バッチサイズを自動で 20→10→5 と段階縮小して成功率を優先します。
+- Pricing呼び出しはASINごとの単発取得に統一しており、配列リクエストは使用しません。
 - 件数が多い場合は実行時間が伸びるため、更新バッチを分けると切り分けしやすくなります。
 - 定期運用前に、少件数データで `output.xlsx` と `logs/run.log` の内容を一度確認することを推奨します。
 - 実行後は `logs/run.log` の終了メトリクスで `unique_asin` と `pricing_calls` がどちらも 0 以外であることを確認してください。
