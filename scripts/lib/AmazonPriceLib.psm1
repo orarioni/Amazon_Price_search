@@ -224,6 +224,26 @@ function Get-CatalogItemPropertySample {
     return ($props -join ',')
 }
 
+function Format-PreviewList {
+    param(
+        [array]$Items,
+        [int]$MaxCount = 20
+    )
+
+    if (-not $Items) { return '<none>' }
+
+    $arr = @($Items)
+    if ($arr.Count -eq 0) { return '<none>' }
+
+    $preview = @($arr | Select-Object -First $MaxCount)
+    $text = ($preview -join ',')
+    if ($arr.Count -gt $MaxCount) {
+        return "$text ...(+$(($arr.Count - $MaxCount)) more)"
+    }
+
+    return $text
+}
+
 function Expand-CatalogItems {
     param([object]$Items)
 
@@ -1035,6 +1055,13 @@ function Get-AsinMapByJanBatch {
         & $applyCatalogItems -Items $catalogItems -TargetMap $resultMap -TargetErrorClassMap $errorClassMap -TargetJanLookupMap $chunkJanLookupMap -ParseStats $chunkParseStats | Out-Null
 
         $unresolvedJans = @($chunk | Where-Object { -not $resultMap[$_] })
+        if (@($unresolvedJans).Count -gt 0) {
+            $resolvedJans = @($chunk | Where-Object { $resultMap[$_] })
+            Write-Log -Message "Catalog unresolved JAN detail: index=$index unresolved.count=$($unresolvedJans.Count) unresolved.list=$(Format-PreviewList -Items $unresolvedJans -MaxCount 30)" -LogPath $LogPath -Level 'WARN'
+            if (@($resolvedJans).Count -gt 0) {
+                Write-Log -Message "Catalog resolved JAN detail: index=$index resolved.count=$($resolvedJans.Count) resolved.list=$(Format-PreviewList -Items $resolvedJans -MaxCount 20)" -LogPath $LogPath
+            }
+        }
         if ($chunkParseStats.Count -gt 0) {
             Write-Log -Message "Catalog parse stats: index=$index size=$($chunk.Count) expanded=$($chunkParseStats.ExpandedItems) withoutIdentifiers=$($chunkParseStats.ItemsWithoutIdentifiers) identifierCandidates=$($chunkParseStats.IdentifierCandidates) matchedIdentifiers=$($chunkParseStats.MatchedIdentifiers) itemsWithAsin=$($chunkParseStats.ItemsWithAsin) unresolved=$($unresolvedJans.Count)" -LogPath $LogPath
             if (($chunkParseStats.ExpandedItems -gt 0) -and ($chunkParseStats.ItemsWithoutIdentifiers -eq $chunkParseStats.ExpandedItems)) {
