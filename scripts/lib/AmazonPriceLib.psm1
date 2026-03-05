@@ -740,6 +740,32 @@ function Get-AsinMapByJanBatch {
         return @()
     }
 
+    $resolveAsinBySingleIdentifier = {
+        param(
+            [string]$Identifier,
+            [string]$IdentifiersType
+        )
+
+        if ([string]::IsNullOrWhiteSpace($Identifier)) { return $null }
+
+        $singleUri = "$($Config.SpApiBaseUrl)/catalog/2022-04-01/items?identifiers=$([Uri]::EscapeDataString($Identifier.Trim()))&identifiersType=$IdentifiersType&includedData=identifiers&marketplaceIds=$($Config.MarketplaceId)"
+        try {
+            $singleRes = Invoke-SpApiRequest -Endpoint "CatalogSingleFallback(type=$IdentifiersType)" -Method 'Get' -Uri $singleUri -Headers (New-SpApiHeaders -AccessToken $AccessToken -Config $Config) -Config $Config -LogPath $LogPath
+            $singleItems = & $resolveCatalogItems -Response $singleRes
+            if ($singleItems.Count -gt 0) {
+                $firstAsin = [string](Get-PropertyValue -Object $singleItems[0] -Name 'asin')
+                if (-not [string]::IsNullOrWhiteSpace($firstAsin)) {
+                    return $firstAsin
+                }
+            }
+        }
+        catch {
+            # 呼び出し元で最終分類するためここでは握りつぶし
+        }
+
+        return $null
+    }
+
     while ($index -lt $Jans.Count) {
         $end = [Math]::Min($index + $batchSize - 1, $Jans.Count - 1)
         $chunk = @($Jans[$index..$end])
@@ -818,6 +844,26 @@ function Get-AsinMapByJanBatch {
             elseif ($eanAttemptDetail) {
                 foreach ($jan in $unresolvedJans) {
                     $errorClassMap[$jan] = $eanAttemptDetail.Class
+                }
+            }
+        }
+
+        $finalUnresolvedJans = @($chunk | Where-Object { -not $resultMap[$_] })
+        if ($finalUnresolvedJans.Count -gt 0) {
+            Write-Log -Message "Catalog単発フォールバック件数: $($finalUnresolvedJans.Count)件 (index=$index)" -LogPath $LogPath -Level 'WARN'
+            foreach ($jan in $finalUnresolvedJans) {
+                $asinFromJan = & $resolveAsinBySingleIdentifier -Identifier $jan -IdentifiersType 'JAN'
+                if ($asinFromJan) {
+                    $resultMap[$jan] = $asinFromJan
+                    $errorClassMap.Remove($jan) | Out-Null
+                    continue
+                }
+
+                $asinFromEan = & $resolveAsinBySingleIdentifier -Identifier $jan -IdentifiersType 'EAN'
+                if ($asinFromEan) {
+                    $resultMap[$jan] = $asinFromEan
+                    $errorClassMap.Remove($jan) | Out-Null
+                    continue
                 }
             }
         }
