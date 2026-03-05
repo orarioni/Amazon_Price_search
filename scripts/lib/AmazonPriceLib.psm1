@@ -204,7 +204,7 @@ function Expand-CatalogItems {
             }
 
             $propertyNames = @($single.PSObject.Properties.Name)
-            if ($propertyNames.Count -gt 0 -and ($propertyNames | Where-Object { $_ -match '^\d+$' }).Count -gt 0) {
+            if ($propertyNames.Count -gt 0 -and @($propertyNames | Where-Object { $_ -match '^\d+$' }).Count -gt 0) {
                 $values = @()
                 foreach ($name in $propertyNames | Sort-Object {[int]$_}) {
                     $values += $single.PSObject.Properties[$name].Value
