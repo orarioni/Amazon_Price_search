@@ -137,6 +137,8 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 - JAN→ASIN キャッシュTTL: 7日（`JanAsinCacheTtlHours`）
 - ASIN→Offers キャッシュTTL: 24時間（`OfferCacheTtlHours`）
 - negative cache TTL: 12時間（`NegativeCacheTtlHours`）
+- not_found 再照会TTL: 24時間（`NotFoundRecheckHours`、未設定時は `NegativeCacheTtlHours` を使用）
+- not_found 強制再照会: `ForceRecheckNotFound=$true` で not_found キャッシュを無視して毎回再照会
 - SP-API応答デバッグ: `DebugSpApiResponse=$true` で要点ログ（`status / errors / request.uri / payload.ASIN / Offers.Count`）をターミナルとログへ出力
 - 応答全文の出力上限: `DebugSpApiResponseMaxChars`（既定 4000 文字、機微情報はマスク）
 - `ok` / `not_found` はキャッシュ保持
@@ -155,11 +157,11 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 - 実行ログ: `logs/run.log`
 - 実行メトリクス(JSONL): `logs/metrics.jsonl`
 - API失敗時の分類（NotFound/Validation, RateLimit/Server, Other）や件数統計を出力
-- 最終サマリに `一時エラー件数` と `未解決件数` を出力
+- 最終サマリに `処理行数` / `成功行数` / `一時エラー件数` / `未解決件数` を出力
   - `一時エラー件数`: `RateLimit/Server` と `Other` のうち再試行対象になり得る一時的失敗件数（当該行は空欄で継続）
   - `未解決件数`: `NotFound/Validation + RateLimit/Server + Other` の合計件数（最終的に解決できず空欄出力になった件数）
 - レート制限関連では `x-amzn-RateLimit-Limit` / `Retry-After` をログに残し、運用時の上限把握に利用
-- 終了時に `input_rows / unique_asin / catalog_calls (batch/single内訳) / pricing_calls / pricing_reduction_pct / http429_count / avg_wait_sec` を出力
+- 終了時に `input_rows / processed_rows / success_rows / unique_asin / catalog_calls (batch/single内訳) / pricing_calls / pricing_reduction_pct / http429_count / avg_wait_sec` を出力
 
 トラブル時はまず `logs/run.log` を確認してください。
 

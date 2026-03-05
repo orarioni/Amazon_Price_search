@@ -13,6 +13,8 @@
     JanAsinCacheTtlHours = 168
     OfferCacheTtlHours   = 24
     NegativeCacheTtlHours = 12
+    NotFoundRecheckHours = 24
+    ForceRecheckNotFound = $false
     CacheTtlHours     = 24
 
     Paths = @{

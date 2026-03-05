@@ -1093,6 +1093,7 @@ function Get-CacheTtlHoursByStatus {
     param([string]$Status, [hashtable]$Config, [string]$CacheKind)
 
     if ($Status -eq 'not_found') {
+        if ($Config.NotFoundRecheckHours) { return [int]$Config.NotFoundRecheckHours }
         if ($Config.NegativeCacheTtlHours) { return [int]$Config.NegativeCacheTtlHours }
         return 12
     }
@@ -1109,6 +1110,7 @@ function Get-CacheTtlHoursByStatus {
 function Test-CacheFreshByStatus {
     param([object]$Entry, [hashtable]$Config, [string]$CacheKind)
     if (-not $Entry) { return $false }
+    if ($Entry.cache_status -eq 'not_found' -and $Config.ForceRecheckNotFound) { return $false }
     $ttl = Get-CacheTtlHoursByStatus -Status $Entry.cache_status -Config $Config -CacheKind $CacheKind
     return Test-CacheFresh -Entry $Entry -TtlHours $ttl
 }
@@ -1218,7 +1220,8 @@ function Invoke-AmazonPriceUpdate {
 
         $persistentCache = Import-PersistentCache -Path $cachePath -LogPath $logPath
         $runCache = @{}
-        $processed = 0
+        $processedRows = 0
+        $successRows = 0
         $transientErrorCount = 0
         $cacheHitCount = 0
         $cacheMissCount = 0
@@ -1371,6 +1374,8 @@ function Invoke-AmazonPriceUpdate {
                 continue
             }
 
+            $processedRows++
+
             try {
                 $result = $runCache[$jan]
                 if ($result -and ($result.cache_status -eq 'not_found' -or $result.cache_status -eq 'transient_error')) {
@@ -1387,6 +1392,7 @@ function Invoke-AmazonPriceUpdate {
                 if ($result -and $null -ne $result.price -and "$($result.price)" -ne '') {
                     $sheet.Cells.Item($row, 8).Value2 = [double]$result.price
                     $sheet.Cells.Item($row, 9).Value2 = if ($result.fetched_at) { [string]$result.fetched_at } else { '' }
+                    $successRows++
                 }
                 else {
                     $sheet.Cells.Item($row, 8).Value2 = ''
@@ -1404,8 +1410,6 @@ function Invoke-AmazonPriceUpdate {
                 $sheet.Cells.Item($row, 9).Value2 = ''
                 Write-Log -Message "行$row JAN=$jan の処理でエラー: 分類=$($detail.Class), HTTP=$($detail.StatusCode), msg=$($_.Exception.Message)" -LogPath $logPath -Level 'ERROR'
             }
-
-            $processed++
         }
 
         Write-Log -Message "依存チェック: runCache確定・Excel反映完了" -LogPath $logPath
@@ -1427,11 +1431,11 @@ function Invoke-AmazonPriceUpdate {
         Write-Log -Message "呼び出し統計: input_rows=$totalDataRows, unique_jan=$($janList.Count), unique_asin=$uniqueAsinCount, cache_hit=$cacheHitCount, cache_miss=$cacheMissCount, catalog_calls=$catalogApiCalls, catalog_batch_calls=$catalogBatchApiCalls, catalog_single_calls=$catalogSingleApiCalls, pricing_calls=$pricingApiCalls, pricing_reduction_pct=$pricingReductionPct" -LogPath $logPath
         Write-Log -Message "再試行統計: api_total_calls=$($script:RunStats.TotalApiCalls), retry_count=$($script:RunStats.RetryCount), http429_count=$($script:RunStats.Http429Count), total_wait_sec=$([Math]::Round($script:RunStats.TotalWaitSec,2)), avg_wait_sec=$avgWait" -LogPath $logPath
         $metricsPath = Join-Path $logDir 'metrics.jsonl'
-        $metricsRecord = [PSCustomObject]@{ ts=(Get-Date).ToString('o'); input_rows=$totalDataRows; unique_jan=$($janList.Count); unique_asin=$uniqueAsinCount; catalog_calls=$catalogApiCalls; catalog_batch_calls=$catalogBatchApiCalls; catalog_single_calls=$catalogSingleApiCalls; pricing_calls=$pricingApiCalls; pricing_reduction_pct=$pricingReductionPct; api_total_calls=$($script:RunStats.TotalApiCalls); retry_count=$($script:RunStats.RetryCount); http429_count=$($script:RunStats.Http429Count); total_wait_sec=[Math]::Round($script:RunStats.TotalWaitSec,2); avg_wait_sec=$avgWait }
+        $metricsRecord = [PSCustomObject]@{ ts=(Get-Date).ToString('o'); input_rows=$totalDataRows; processed_rows=$processedRows; success_rows=$successRows; unique_jan=$($janList.Count); unique_asin=$uniqueAsinCount; catalog_calls=$catalogApiCalls; catalog_batch_calls=$catalogBatchApiCalls; catalog_single_calls=$catalogSingleApiCalls; pricing_calls=$pricingApiCalls; pricing_reduction_pct=$pricingReductionPct; api_total_calls=$($script:RunStats.TotalApiCalls); retry_count=$($script:RunStats.RetryCount); http429_count=$($script:RunStats.Http429Count); total_wait_sec=[Math]::Round($script:RunStats.TotalWaitSec,2); avg_wait_sec=$avgWait }
         Add-Content -Path $metricsPath -Value ($metricsRecord | ConvertTo-Json -Compress -Depth 5) -Encoding UTF8
         $totalUnresolvedCount = $notFoundValidationCount + $rateLimitServerCount + $otherErrorCount
         Write-Log -Message "エラー分類統計: NotFound/Validation=$notFoundValidationCount, RateLimit/Server=$rateLimitServerCount, Other=$otherErrorCount" -LogPath $logPath
-        Write-Log -Message "更新完了: 処理件数=$processed, 一時エラー件数=$transientErrorCount, 未解決件数=$totalUnresolvedCount, 出力=$outputPath" -LogPath $logPath
+        Write-Log -Message "更新完了: 処理行数=$processedRows, 成功行数=$successRows, 一時エラー件数=$transientErrorCount, 未解決件数=$totalUnresolvedCount, 出力=$outputPath" -LogPath $logPath
     }
     finally {
         Write-Progress -Activity 'Excel出力処理' -Completed
