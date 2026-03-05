@@ -824,15 +824,20 @@ function Get-AsinMapByJanBatch {
 
         $finalUnresolvedJans = @($chunk | Where-Object { -not $resultMap[$_] })
         if ($finalUnresolvedJans.Count -gt 0) {
-            Write-Log -Message "Catalog単発(JAN)フォールバック件数: $($finalUnresolvedJans.Count)件 (index=$index)" -LogPath $LogPath -Level 'WARN'
-            foreach ($jan in $finalUnresolvedJans) {
-                $asinFromJan = & $resolveAsinBySingleIdentifier -Identifier $jan -IdentifiersType 'JAN'
-                if ($asinFromJan) {
-                    $resultMap[$jan] = $asinFromJan
-                    $errorClassMap.Remove($jan) | Out-Null
-                    continue
-                }
+            if ($catalogItems.Count -eq 0) {
+                Write-Log -Message "Catalog単発(JAN)フォールバックをスキップします: バッチitems=0 (index=$index, unresolved=$($finalUnresolvedJans.Count))" -LogPath $LogPath -Level 'WARN'
+            }
+            else {
+                Write-Log -Message "Catalog単発(JAN)フォールバック件数: $($finalUnresolvedJans.Count)件 (index=$index)" -LogPath $LogPath -Level 'WARN'
+                foreach ($jan in $finalUnresolvedJans) {
+                    $asinFromJan = & $resolveAsinBySingleIdentifier -Identifier $jan -IdentifiersType 'JAN'
+                    if ($asinFromJan) {
+                        $resultMap[$jan] = $asinFromJan
+                        $errorClassMap.Remove($jan) | Out-Null
+                        continue
+                    }
 
+                }
             }
         }
 
