@@ -2,21 +2,27 @@
 chcp 65001 >nul
 cd /d "%~dp0"
 
-rem Use explicit path to PowerShell if available to avoid PATH/parse issues
-set "PS_EXE=%SystemRoot%\system32\WindowsPowerShell\v1.0\powershell.exe"
-if not exist "%PS_EXE%" (
-  rem fallback to powershell on PATH
-  set "PS_EXE=powershell"
+set "PS7_EXE="
+set "PF64=%ProgramFiles%"
+set "PF86=%ProgramFiles(x86)%"
+
+if defined PF64 if exist "%PF64%\PowerShell\7\pwsh.exe" set "PS7_EXE=%PF64%\PowerShell\7\pwsh.exe"
+if not defined PS7_EXE if defined PF86 if exist "%PF86%\PowerShell\7\pwsh.exe" set "PS7_EXE=%PF86%\PowerShell\7\pwsh.exe"
+if not defined PS7_EXE for %%I in (pwsh.exe) do set "PS7_EXE=%%~$PATH:I"
+
+if not defined PS7_EXE (
+  echo.
+  echo [ERROR] PowerShell 7 / pwsh was not found.
+  echo [HINT] Run run_prepare_ps7_installer.bat first, then install PowerShell 7.
+  exit /b 1
 )
 
-rem Build safe file path and arguments (keep quoting for the -File arg)
-set "PS_FILE=%~dp0scripts\00_init_secrets.ps1"
-"%PS_EXE%" -NoProfile -ExecutionPolicy Bypass -File "%PS_FILE%"
+"%PS7_EXE%" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\00_init_secrets.ps1"
 set "EXIT_CODE=%ERRORLEVEL%"
 
 if %EXIT_CODE% neq 0 (
   echo.
-  echo [ERROR] 初期設定に失敗しました。メッセージを確認してください。 (ExitCode=%EXIT_CODE%)
+  echo [ERROR] Initial setup failed. Check the message above. ExitCode=%EXIT_CODE%
   exit /b %EXIT_CODE%
 )
 

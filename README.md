@@ -23,9 +23,8 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 
 - **OS**: Windows 11（Windows 10 でも概ね動作想定）
 - **Excel**: Microsoft Excel（COM 自動化を利用）
-- **PowerShell**: PowerShell 7 (pwsh) 推奨、または Windows PowerShell 5.1 以上
-  - PS 7+ では REST API 呼び出しが標準化され、ヘッダー抽出が効率的
-  - PS 5.1 でも完全互換（Invoke-WebRequest -UseBasicParsing 付与）
+- **PowerShell**: **PowerShell 7 (pwsh) 必須**（本リポジトリの `.bat` は pwsh 前提）
+  - 上司PC向けインストーラーは `run_prepare_ps7_installer.bat` で取得可能（`installers/` に保存）
 - **ネットワーク**: Amazon API へ HTTPS 接続できること
 - **認証情報**: Amazon SP-API 用の以下3点
   - `client_id`
@@ -39,12 +38,13 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 ## 初回セットアップ（1回だけ）
 
 1. Excel をすべて閉じる
-2. リポジトリ直下で `run_init.bat` を実行（ダブルクリック可）
-3. プロンプトに従って以下を入力
+2. （未導入PCのみ）`run_prepare_ps7_installer.bat` を実行し、`installers/` の MSI を使って PowerShell 7 をインストール
+3. リポジトリ直下で `run_init.bat` を実行（ダブルクリック可）
+4. プロンプトに従って以下を入力
    - `client_id`
    - `client_secret`
    - `refresh_token`
-4. `secrets/lwa_secrets.xml` 作成メッセージを確認
+5. `secrets/lwa_secrets.xml` 作成メッセージを確認
 
 `run_init.bat` は内部で `scripts/00_init_secrets.ps1` を呼び出し、認証情報を保存します。
 
@@ -171,7 +171,7 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 
 **対処**:
 - JANの桁・値を再確認
-- 本ツールは Catalog API で **JAN検索→未解決分のみEANフォールバック検索** を実施済み（`identifiersType=JAN` 後に `identifiersType=EAN`）
+- 本ツールは Catalog API で `identifiersType=JAN` のみを使用して検索します（EANフォールバックは行いません）。
 - 必要に応じて Amazon 側で商品存在を確認
 - `logs/run.log` の該当JANの分類ログを確認
 
@@ -201,8 +201,9 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 
 ## ディレクトリ構成（主要）
 
-- `run_init.bat` : 初期認証情報登録の起動
-- `run_update.bat` : 更新処理の起動
+- `run_prepare_ps7_installer.bat` : 上司PC向け PowerShell 7 インストーラー取得
+- `run_init.bat` : 初期認証情報登録の起動（pwsh 実行）
+- `run_update.bat` : 更新処理の起動（pwsh 実行）
 - `config.psd1` : 環境設定（マーケットプレイス、TTL、各パス等）
 - `scripts/00_init_secrets.ps1` : 薄い実行スクリプト（入力→保存）
 - `scripts/10_update_excel.ps1` : 薄い実行スクリプト（設定読込→実行）

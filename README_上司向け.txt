@@ -2,8 +2,9 @@
 
 ■ 初回だけ実施
 1) Excelを閉じる
-2) run_init.bat をダブルクリック
-3) client_id / client_secret / refresh_token を入力して保存完了メッセージを確認
+2) run_prepare_ps7_installer.bat を実行し、installers フォルダの MSI で PowerShell 7 をインストール
+3) run_init.bat をダブルクリック
+4) client_id / client_secret / refresh_token を入力して保存完了メッセージを確認
 
 ■ 毎回の更新手順
 1) data\input.xlsx を更新（JANコードは B列、1行目は見出し）
@@ -30,3 +31,8 @@
   Excelが開いたままの可能性があります。Excelをすべて閉じて再実行してください。
 - invalid_grant:
   refresh_token の期限切れ/誤入力の可能性があります。run_init.bat で認証情報を再登録してください。
+- run_prepare_ps7_installer.bat 実行時に ParserError（The string is missing the terminator）が出る場合は、最新版を再取得してください（本不具合を修正済み）。
+
+
+■ 補足
+- 本ツールの PowerShell 実行コマンドはすべて PowerShell 7（pwsh）向けに統一済みです。
