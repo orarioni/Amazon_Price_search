@@ -12,7 +12,8 @@ try {
     $excel = New-Object -ComObject Excel.Application
     $excel.Visible = $false
     $excel.DisplayAlerts = $false
-    $wb = $excel.Workbooks.Open($inputPath)
+    # ReadOnly=true で開き、input.xlsx を変更・上書きしない
+    $wb = $excel.Workbooks.Open($inputPath, 0, $true)
     $sh = $wb.Worksheets.Item(1)
 
     $lastRow = $sh.Cells($sh.Rows.Count, 2).End(-4162).Row # xlUp
