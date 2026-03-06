@@ -5,7 +5,7 @@ try {
     $configPath = Join-Path $repoRoot 'config.psd1'
     $libPath = Join-Path $PSScriptRoot 'lib/AmazonPriceLib.psm1'
 
-    Import-Module $libPath -Force
+    Import-Module $libPath -Force -DisableNameChecking
     $config = Import-PowerShellDataFile -Path $configPath
     $secretFile = Join-Path $repoRoot $config.Paths.SecretsFile
 
