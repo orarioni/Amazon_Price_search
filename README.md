@@ -230,6 +230,7 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 
 - `run_init.bat` : 初期認証情報登録の起動
 - `run_update.bat` : 更新処理の起動
+- `README_上司向け.md` : 上司向けの簡易運用手順（短縮版）
 - `config.psd1` : 環境設定（マーケットプレイス、TTL、各パス等）
 - `scripts/00_init_secrets.ps1` : 薄い実行スクリプト（入力→保存）
 - `scripts/10_update_excel.ps1` : 薄い実行スクリプト（設定読込→実行）
