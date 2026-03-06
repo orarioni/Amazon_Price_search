@@ -14,10 +14,14 @@ set "PS_FILE=%~dp0scripts\00_init_secrets.ps1"
 "%PS_EXE%" -NoProfile -ExecutionPolicy Bypass -File "%PS_FILE%"
 set "EXIT_CODE=%ERRORLEVEL%"
 
+echo.
 if %EXIT_CODE% neq 0 (
-  echo.
   echo [ERROR] 初期設定に失敗しました。メッセージを確認してください。 (ExitCode=%EXIT_CODE%)
-  exit /b %EXIT_CODE%
+) else (
+  echo [OK] 初期設定が完了しました。
 )
 
-exit /b 0
+echo.
+echo 終了するには何かキーを押してください...
+pause >nul
+exit /b %EXIT_CODE%
