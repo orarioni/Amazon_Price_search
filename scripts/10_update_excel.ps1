@@ -1,4 +1,19 @@
-﻿$ErrorActionPreference = 'Stop'
+﻿function Import-ConfigDataFile {
+    param([Parameter(Mandatory=$true)][string]$Path)
+
+    if (Get-Command -Name Import-PowerShellDataFile -ErrorAction SilentlyContinue) {
+        return Import-PowerShellDataFile -Path $Path
+    }
+
+    $raw = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop
+    $parsed = Invoke-Expression $raw
+    if ($parsed -isnot [hashtable]) {
+        throw "Failed to parse config data file as hashtable: $Path"
+    }
+    return $parsed
+}
+
+$ErrorActionPreference = 'Stop'
 
 try {
     $repoRoot = Resolve-Path (Join-Path $PSScriptRoot '..')
@@ -6,7 +21,7 @@ try {
     $libPath = Join-Path $PSScriptRoot 'lib/AmazonPriceLib.psm1'
 
     Import-Module $libPath -Force
-    $config = Import-PowerShellDataFile -Path $configPath
+    $config = Import-ConfigDataFile -Path $configPath
 
     Invoke-AmazonPriceUpdate -RepoRoot $repoRoot -Config $config
     exit 0

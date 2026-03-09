@@ -3,7 +3,23 @@
     [int]$MaxJanCount = 20
 )
 
-$Config = Import-PowerShellDataFile -Path 'config.psd1'
+function Import-ConfigDataFile {
+    param([Parameter(Mandatory=$true)][string]$Path)
+
+    if (Get-Command -Name Import-PowerShellDataFile -ErrorAction SilentlyContinue) {
+        return Import-PowerShellDataFile -Path $Path
+    }
+
+    $raw = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop
+    $parsed = Invoke-Expression $raw
+    if ($parsed -isnot [hashtable]) {
+        throw "Failed to parse config data file as hashtable: $Path"
+    }
+    return $parsed
+}
+
+
+$Config = Import-ConfigDataFile -Path 'config.psd1'
 $libPath = Join-Path $PSScriptRoot 'scripts/lib/AmazonPriceLib.psm1'
 Import-Module $libPath -Force
 
