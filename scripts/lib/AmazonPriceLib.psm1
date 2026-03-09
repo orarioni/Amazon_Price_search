@@ -1017,28 +1017,74 @@ function Get-AsinMapByJanBatch {
         }
 
         $identifiers = ($chunk | ForEach-Object { $_.Trim() }) -join ','
-        $uri = "$($Config.SpApiBaseUrl)/catalog/2022-04-01/items?identifiers=$([Uri]::EscapeDataString($identifiers))&identifiersType=JAN&marketplaceIds=$($Config.MarketplaceId)&includedData=identifiers"
-        Write-Log -Message "JAN検索: $($chunk.Count)件 (index=$index,size=$batchSize)" -LogPath $LogPath
+        $catalogPageSize = [Math]::Min($batchSize, 20)
+        $baseUri = "$($Config.SpApiBaseUrl)/catalog/2022-04-01/items?identifiers=$([Uri]::EscapeDataString($identifiers))&identifiersType=JAN&marketplaceIds=$($Config.MarketplaceId)&includedData=identifiers&pageSize=$catalogPageSize"
+        Write-Log -Message "JAN検索: $($chunk.Count)件 (index=$index,size=$batchSize,pageSize=$catalogPageSize)" -LogPath $LogPath
 
         $res = $null
         $attemptDetail = $null
-        try {
-            $res = Invoke-SpApiRequest -Endpoint "CatalogBatch(index=$index,size=$batchSize)" -Method 'Get' -Uri $uri -Headers (New-SpApiHeaders -AccessToken $AccessToken -Config $Config) -Config $Config -LogPath $LogPath
-        }
-        catch {
-            $attemptDetail = Get-ErrorDetail -ErrorRecord $_
-            if ($attemptDetail.Class -eq 'Auth' -and $AuthContext) {
-                try {
-                    $AccessToken = Get-LwaAccessTokenCached -ClientId $AuthContext.ClientId -ClientSecret $AuthContext.ClientSecret -RefreshToken $AuthContext.RefreshToken -Config $Config -LogPath $LogPath -TokenCachePath $AuthContext.TokenCachePath -ForceRefresh
-                    $res = Invoke-SpApiRequest -Endpoint "CatalogBatchAuthRetry(index=$index,size=$batchSize)" -Method 'Get' -Uri $uri -Headers (New-SpApiHeaders -AccessToken $AccessToken -Config $Config) -Config $Config -LogPath $LogPath
-                }
-                catch {
-                    $attemptDetail = Get-ErrorDetail -ErrorRecord $_
+        $pageResponses = New-Object System.Collections.Generic.List[object]
+        $pageNumber = 1
+        $maxPages = 10
+        $seenNextTokens = New-Object System.Collections.Generic.HashSet[string]
+        $nextToken = $null
+
+        while ($true) {
+            $requestUri = $baseUri
+            if (-not [string]::IsNullOrWhiteSpace($nextToken)) {
+                $requestUri = "$baseUri&pageToken=$([Uri]::EscapeDataString($nextToken))"
+            }
+
+            $res = $null
+            $attemptDetail = $null
+            try {
+                $res = Invoke-SpApiRequest -Endpoint "CatalogBatch(index=$index,size=$batchSize,page=$pageNumber)" -Method 'Get' -Uri $requestUri -Headers (New-SpApiHeaders -AccessToken $AccessToken -Config $Config) -Config $Config -LogPath $LogPath
+            }
+            catch {
+                $attemptDetail = Get-ErrorDetail -ErrorRecord $_
+                if ($attemptDetail.Class -eq 'Auth' -and $AuthContext) {
+                    try {
+                        $AccessToken = Get-LwaAccessTokenCached -ClientId $AuthContext.ClientId -ClientSecret $AuthContext.ClientSecret -RefreshToken $AuthContext.RefreshToken -Config $Config -LogPath $LogPath -TokenCachePath $AuthContext.TokenCachePath -ForceRefresh
+                        $res = Invoke-SpApiRequest -Endpoint "CatalogBatchAuthRetry(index=$index,size=$batchSize,page=$pageNumber)" -Method 'Get' -Uri $requestUri -Headers (New-SpApiHeaders -AccessToken $AccessToken -Config $Config) -Config $Config -LogPath $LogPath
+                    }
+                    catch {
+                        $attemptDetail = Get-ErrorDetail -ErrorRecord $_
+                    }
                 }
             }
+
+            if (-not $res) {
+                break
+            }
+
+            $null = $pageResponses.Add($res)
+            $catalogItemsPage = Get-PropertyValue -Object $res -Name 'items'
+            $expandedItemsPageCount = @(Expand-CatalogItems -Items $catalogItemsPage).Count
+            $pagination = Get-PropertyValue -Object $res -Name 'pagination'
+            $nextTokenCandidate = [string](Get-PropertyValue -Object $pagination -Name 'nextToken')
+            if ([string]::IsNullOrWhiteSpace($nextTokenCandidate)) {
+                $nextTokenCandidate = [string](Get-PropertyValue -Object $pagination -Name 'NextToken')
+            }
+            $nextTokenPreview = if ([string]::IsNullOrWhiteSpace($nextTokenCandidate)) { '<none>' } else { $nextTokenCandidate.Substring(0, [Math]::Min(16, $nextTokenCandidate.Length)) }
+            Write-Log -Message "Catalog page fetch: index=$index page=$pageNumber items=$expandedItemsPageCount nextToken=$nextTokenPreview" -LogPath $LogPath
+
+            if ([string]::IsNullOrWhiteSpace($nextTokenCandidate)) {
+                break
+            }
+            if ($pageNumber -ge $maxPages) {
+                Write-Log -Message "Catalog page fetch reached maxPages=$maxPages (index=$index)" -LogPath $LogPath -Level 'WARN'
+                break
+            }
+            if (-not $seenNextTokens.Add($nextTokenCandidate)) {
+                Write-Log -Message "Catalog page fetch detected duplicated nextToken (index=$index,page=$pageNumber)" -LogPath $LogPath -Level 'WARN'
+                break
+            }
+
+            $nextToken = $nextTokenCandidate
+            $pageNumber++
         }
 
-        if (-not $res) {
+        if (@($pageResponses).Count -eq 0) {
             if ($attemptDetail -and $attemptDetail.Class -eq 'RateLimit/Server' -and $batchSize -gt $minBatchSize) {
                 $nextBatchSize = [Math]::Max($minBatchSize, [int][Math]::Floor($batchSize / 2))
                 Write-Log -Message "Catalogバッチを縮小します: $batchSize -> $nextBatchSize (index=$index, HTTP=$($attemptDetail.StatusCode), limit=$($attemptDetail.RateLimitLimit))" -LogPath $LogPath -Level 'WARN'
@@ -1055,8 +1101,12 @@ function Get-AsinMapByJanBatch {
             continue
         }
 
-        $catalogItems = Get-PropertyValue -Object $res -Name 'items'
-        & $applyCatalogItems -Items $catalogItems -TargetMap $resultMap -TargetErrorClassMap $errorClassMap -TargetJanLookupMap $chunkJanLookupMap -ParseStats $chunkParseStats | Out-Null
+        $catalogItems = @()
+        foreach ($pageRes in @($pageResponses)) {
+            $catalogItemsPage = Get-PropertyValue -Object $pageRes -Name 'items'
+            $catalogItems += @(Expand-CatalogItems -Items $catalogItemsPage)
+            & $applyCatalogItems -Items $catalogItemsPage -TargetMap $resultMap -TargetErrorClassMap $errorClassMap -TargetJanLookupMap $chunkJanLookupMap -ParseStats $chunkParseStats | Out-Null
+        }
 
         $unresolvedJans = @($chunk | Where-Object { -not $resultMap[$_] })
         if (@($unresolvedJans).Count -gt 0) {
