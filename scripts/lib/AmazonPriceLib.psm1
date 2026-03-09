@@ -625,6 +625,13 @@ function Get-ErrorDetail {
 
     if ($ErrorRecord -and $ErrorRecord.Exception) {
         try {
+            if ($ErrorRecord.ErrorDetails -and $ErrorRecord.ErrorDetails.Message) {
+                $bodyText = [string]$ErrorRecord.ErrorDetails.Message
+            }
+        }
+        catch {}
+
+        try {
             $hasResponse = $ErrorRecord.Exception | Get-Member -Name 'Response' -MemberType 'Property' -ErrorAction SilentlyContinue
             if ($hasResponse -and $ErrorRecord.Exception.Response) {
                 if ($ErrorRecord.Exception.Response.StatusCode) {
@@ -663,18 +670,24 @@ function Get-ErrorDetail {
         }
         catch {}
 
-        try {
-            $hasResponse = $ErrorRecord.Exception | Get-Member -Name 'Response' -MemberType 'Property' -ErrorAction SilentlyContinue
-            if ($hasResponse) {
-                $stream = $ErrorRecord.Exception.Response.GetResponseStream()
-                if ($stream) {
-                    $reader = New-Object System.IO.StreamReader($stream)
-                    $bodyText = $reader.ReadToEnd()
-                    $reader.Close()
+        if ([string]::IsNullOrWhiteSpace($bodyText)) {
+            try {
+                $hasResponse = $ErrorRecord.Exception | Get-Member -Name 'Response' -MemberType 'Property' -ErrorAction SilentlyContinue
+                if ($hasResponse) {
+                    $stream = $ErrorRecord.Exception.Response.GetResponseStream()
+                    if ($stream -and $stream.CanRead) {
+                        $reader = New-Object System.IO.StreamReader($stream)
+                        try {
+                            $bodyText = $reader.ReadToEnd()
+                        }
+                        finally {
+                            $reader.Dispose()
+                        }
+                    }
                 }
             }
+            catch {}
         }
-        catch {}
     }
 
     $classification = Get-StatusClassification -StatusCode $statusCode -BodyText $bodyText
