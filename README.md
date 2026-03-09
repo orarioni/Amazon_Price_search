@@ -36,6 +36,18 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 
 ---
 
+## SP-API 認証情報（client_id / client_secret / refresh_token）の取得手順（簡潔）
+
+1. **Amazon Seller Central** にログイン
+2. **開発者（Developer Central）** で SP-API アプリを作成（または既存アプリを利用）
+3. アプリ詳細から **`client_id`** と **`client_secret`** を控える
+4. 同じアプリを使って OAuth 認可を実施し、発行された **`refresh_token`** を控える
+5. 取得した3点（`client_id` / `client_secret` / `refresh_token`）を `run_init.bat` 実行時に入力する
+
+> 補足: 会社運用で既に発行済みの認証情報がある場合は、新規発行せず管理者から共有された値を使用してください。
+
+---
+
 ## 初回セットアップ（1回だけ）
 
 1. Excel をすべて閉じる
