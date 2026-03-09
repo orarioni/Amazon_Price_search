@@ -37,6 +37,7 @@ function Initialize-RunStats {
         TotalWaitSec       = 0.0
         WaitEvents         = 0
         NextPricingAllowedAt = Get-Date
+        NextCatalogAllowedAt = Get-Date
         PricingCooldownSec = 0.0
     }
 }
@@ -426,6 +427,22 @@ function Wait-ForPricingSlot {
     $script:RunStats.NextPricingAllowedAt = (Get-Date).AddSeconds($baseInterval + [double]$script:RunStats.PricingCooldownSec)
 }
 
+function Wait-ForCatalogSlot {
+    param([hashtable]$Config)
+    if (-not $script:RunStats) { return }
+
+    $now = Get-Date
+    $baseInterval = if ($Config.CatalogMinIntervalSec) { [double]$Config.CatalogMinIntervalSec } else { 1.2 }
+    $target = if ($script:RunStats.NextCatalogAllowedAt -gt $now) { $script:RunStats.NextCatalogAllowedAt } else { $now }
+    $waitSec = ($target - $now).TotalSeconds
+    if ($waitSec -gt 0) {
+        Start-Sleep -Milliseconds ([int]([Math]::Ceiling($waitSec * 1000)))
+        Add-WaitMetric -Seconds $waitSec
+    }
+
+    $script:RunStats.NextCatalogAllowedAt = (Get-Date).AddSeconds($baseInterval)
+}
+
 function Update-PricingThrottleFromLimit {
     param(
         [string]$RateLimitLimit,
@@ -560,7 +577,8 @@ function Invoke-SpApiRequest {
             }
 
             $bodyMsg = if ($detail.BodyText) { " body='$($detail.BodyText)'" } else { '' }
-            Write-Log -Message "$Endpoint retry: status=$status class=$($detail.Class) code=$errorCode requestId=$requestId wait=$([Math]::Round($sleepSec,2))s limit=$($detail.RateLimitLimit) attempt=$attempt/$maxAttempts$bodyMsg" -LogPath $LogPath -Level 'WARN'
+            $endpointKind = if ($Endpoint -match '^Catalog') { 'Catalog' } elseif ($Endpoint -match '^Pricing') { 'Pricing' } else { 'Other' }
+            Write-Log -Message "$Endpoint retry: kind=$endpointKind status=$status class=$($detail.Class) code=$errorCode requestId=$requestId wait=$([Math]::Round($sleepSec,2))s limit=$($detail.RateLimitLimit) attempt=$attempt/$maxAttempts$bodyMsg" -LogPath $LogPath -Level 'WARN'
             Start-Sleep -Milliseconds ([int]([Math]::Ceiling($sleepSec * 1000)))
         }
     }
@@ -1038,6 +1056,7 @@ function Get-AsinMapByJanBatch {
             $res = $null
             $attemptDetail = $null
             try {
+                Wait-ForCatalogSlot -Config $Config
                 $res = Invoke-SpApiRequest -Endpoint "CatalogBatch(index=$index,size=$batchSize,page=$pageNumber)" -Method 'Get' -Uri $requestUri -Headers (New-SpApiHeaders -AccessToken $AccessToken -Config $Config) -Config $Config -LogPath $LogPath
             }
             catch {
@@ -1045,6 +1064,7 @@ function Get-AsinMapByJanBatch {
                 if ($attemptDetail.Class -eq 'Auth' -and $AuthContext) {
                     try {
                         $AccessToken = Get-LwaAccessTokenCached -ClientId $AuthContext.ClientId -ClientSecret $AuthContext.ClientSecret -RefreshToken $AuthContext.RefreshToken -Config $Config -LogPath $LogPath -TokenCachePath $AuthContext.TokenCachePath -ForceRefresh
+                        Wait-ForCatalogSlot -Config $Config
                         $res = Invoke-SpApiRequest -Endpoint "CatalogBatchAuthRetry(index=$index,size=$batchSize,page=$pageNumber)" -Method 'Get' -Uri $requestUri -Headers (New-SpApiHeaders -AccessToken $AccessToken -Config $Config) -Config $Config -LogPath $LogPath
                     }
                     catch {
