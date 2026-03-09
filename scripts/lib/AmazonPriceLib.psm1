@@ -1041,10 +1041,10 @@ function Get-AsinMapByJanBatch {
 
         $res = $null
         $attemptDetail = $null
-        $pageResponses = New-Object System.Collections.Generic.List[object]
+        $pageResponses = @()
         $pageNumber = 1
         $maxPages = 10
-        $seenNextTokens = New-Object System.Collections.Generic.HashSet[string]
+        $seenNextTokens = @{}
         $nextToken = $null
 
         while ($true) {
@@ -1077,7 +1077,7 @@ function Get-AsinMapByJanBatch {
                 break
             }
 
-            $null = $pageResponses.Add($res)
+            $pageResponses += @($res)
             $catalogItemsPage = Get-PropertyValue -Object $res -Name 'items'
             $expandedItemsPageCount = @(Expand-CatalogItems -Items $catalogItemsPage).Count
             $pagination = Get-PropertyValue -Object $res -Name 'pagination'
@@ -1095,11 +1095,12 @@ function Get-AsinMapByJanBatch {
                 Write-Log -Message "Catalog page fetch reached maxPages=$maxPages (index=$index)" -LogPath $LogPath -Level 'WARN'
                 break
             }
-            if (-not $seenNextTokens.Add($nextTokenCandidate)) {
+            if ($seenNextTokens.ContainsKey($nextTokenCandidate)) {
                 Write-Log -Message "Catalog page fetch detected duplicated nextToken (index=$index,page=$pageNumber)" -LogPath $LogPath -Level 'WARN'
                 break
             }
 
+            $seenNextTokens[$nextTokenCandidate] = $true
             $nextToken = $nextTokenCandidate
             $pageNumber++
         }
