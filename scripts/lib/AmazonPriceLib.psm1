@@ -912,6 +912,7 @@ function Get-AsinMapByJanBatch {
 
     $resultMap = @{}
     $errorClassMap = @{}
+    $errorReasonMap = @{}
     $minBatchSize = 5
     $batchSize = [Math]::Max($minBatchSize, [int]$Config.CatalogBatchSize)
     $index = 0
@@ -994,6 +995,7 @@ function Get-AsinMapByJanBatch {
                 if ($ParseStats) { $ParseStats.ItemsWithAsin++ }
                 $TargetMap[$matchedIdentifier] = $asin
                 $TargetErrorClassMap.Remove($matchedIdentifier) | Out-Null
+                $errorReasonMap.Remove($matchedIdentifier) | Out-Null
             }
         }
 
@@ -1046,7 +1048,9 @@ function Get-AsinMapByJanBatch {
 
             foreach ($jan in $chunk) {
                 $errorClassMap[$jan] = if ($attemptDetail) { $attemptDetail.Class } else { 'Other' }
+                $errorReasonMap[$jan] = 'ApiError'
             }
+            Write-Log -Message "Catalog unresolved reason stats: index=$index unresolvedByReason=ApiError=$($chunk.Count)" -LogPath $LogPath -Level 'WARN'
             $index = $end + 1
             continue
         }
@@ -1077,6 +1081,35 @@ function Get-AsinMapByJanBatch {
         }
         Write-Log -Message "EANフォールバックは無効化されています: unresolved=$($unresolvedJans.Count)件 (index=$index)" -LogPath $LogPath
 
+        $chunkUnresolvedReason = 'IdentifierMismatch'
+        if ($chunkParseStats.ExpandedItems -eq 0) {
+            $chunkUnresolvedReason = 'CatalogNoItems'
+        }
+        elseif (($chunkParseStats.ExpandedItems -gt 0) -and ($chunkParseStats.ItemsWithoutIdentifiers -eq $chunkParseStats.ExpandedItems)) {
+            $chunkUnresolvedReason = 'CatalogNoIdentifiers'
+        }
+        elseif (($chunkParseStats.IdentifierCandidates -eq 0) -and ($chunkParseStats.ExpandedItems -gt 0)) {
+            $chunkUnresolvedReason = 'IdentifierMismatch'
+        }
+
+        foreach ($jan in $unresolvedJans) {
+            if (-not $errorReasonMap.ContainsKey($jan)) {
+                $errorReasonMap[$jan] = $chunkUnresolvedReason
+            }
+        }
+
+        if (@($unresolvedJans).Count -gt 0) {
+            $reasonCountMap = @{}
+            foreach ($jan in $unresolvedJans) {
+                $reason = [string]$errorReasonMap[$jan]
+                if ([string]::IsNullOrWhiteSpace($reason)) { $reason = 'Unknown' }
+                if (-not $reasonCountMap.ContainsKey($reason)) { $reasonCountMap[$reason] = 0 }
+                $reasonCountMap[$reason]++
+            }
+            $reasonText = (@($reasonCountMap.Keys | Sort-Object | ForEach-Object { "$_=$($reasonCountMap[$_])" })) -join ','
+            Write-Log -Message "Catalog unresolved reason stats: index=$index unresolvedByReason=$reasonText" -LogPath $LogPath -Level 'WARN'
+        }
+
         foreach ($jan in $chunk) {
             if (-not $resultMap[$jan] -and -not $errorClassMap.ContainsKey($jan)) {
                 $errorClassMap[$jan] = 'NotFound/Validation'
@@ -1086,7 +1119,7 @@ function Get-AsinMapByJanBatch {
         $index = $end + 1
     }
 
-    [PSCustomObject]@{ AsinMap = $resultMap; ErrorClassMap = $errorClassMap }
+    [PSCustomObject]@{ AsinMap = $resultMap; ErrorClassMap = $errorClassMap; ErrorReasonMap = $errorReasonMap }
 }
 
 

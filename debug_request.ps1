@@ -78,6 +78,17 @@ try {
     $r = Get-AsinMapByJanBatch -Jans $sample -AccessToken $token -Config $Config -LogPath 'logs/run.log' -AuthContext $authContext
     Write-Host 'Result:'
     $r
+
+    $rows = foreach ($jan in @($sample)) {
+        [PSCustomObject]@{
+            JAN         = $jan
+            ASIN        = $r.AsinMap[$jan]
+            ErrorClass  = $r.ErrorClassMap[$jan]
+            ErrorReason = if ($r.PSObject.Properties.Name -contains 'ErrorReasonMap') { $r.ErrorReasonMap[$jan] } else { $null }
+        }
+    }
+    Write-Host 'Result detail:'
+    $rows | Sort-Object JAN | Format-Table -AutoSize
 }
 catch {
     Write-Host 'Manual call failed:' $_.Exception.Message
