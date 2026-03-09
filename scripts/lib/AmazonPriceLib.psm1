@@ -1037,7 +1037,13 @@ function Get-AsinMapByJanBatch {
         $end = [Math]::Min($index + $batchSize - 1, $Jans.Count - 1)
         $chunk = @($Jans[$index..$end])
         $chunkJanLookupMap = @{}
-        $chunkParseStats = @{}
+        $chunkParseStats = @{
+            ExpandedItems = 0
+            ItemsWithoutIdentifiers = 0
+            IdentifierCandidates = 0
+            MatchedIdentifiers = 0
+            ItemsWithAsin = 0
+        }
         foreach ($jan in $chunk) {
             $resultMap[$jan] = $null
             foreach ($lookupKey in (Get-IdentifierMatchKeys -Identifier ([string]$jan))) {
