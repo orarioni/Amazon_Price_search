@@ -427,7 +427,7 @@ function Wait-ForPricingSlot {
     if (-not $script:RunStats) { return }
 
     $now = Get-Date
-    $baseInterval = if ($Config.PricingMinIntervalSec) { [double]$Config.PricingMinIntervalSec } else { 2.2 }
+    $baseInterval = if ($Config.PricingDefaultIntervalSec) { [double]$Config.PricingDefaultIntervalSec } else { 12.0 }
     $target = if ($script:RunStats.NextPricingAllowedAt -gt $now) { $script:RunStats.NextPricingAllowedAt } else { $now }
     $waitSec = ($target - $now).TotalSeconds
     if ($waitSec -gt 0) {
@@ -470,14 +470,19 @@ function Update-PricingThrottleFromLimit {
         $script:RunStats.PricingCooldownSec = [Math]::Max(0.0, [double]$script:RunStats.PricingCooldownSec - 0.2)
     }
 
-    $baseInterval = if ($Config.PricingMinIntervalSec) { [double]$Config.PricingMinIntervalSec } else { 2.2 }
-    if ($RateLimitLimit) {
-        $limit = $RateLimitLimit -as [double]
-        if ($limit -and $limit -gt 0) {
-            if ($limit -le 0.5) { $baseInterval = Get-Random -Minimum 2.2 -Maximum 2.5 }
-            elseif ($limit -le 1.0) { $baseInterval = Get-Random -Minimum 1.1 -Maximum 1.3 }
-            else { $baseInterval = [Math]::Max(0.4, (1.0 / $limit) * 1.2) }
+    $defaultInterval = if ($Config.PricingDefaultIntervalSec) { [double]$Config.PricingDefaultIntervalSec } else { 12.0 }
+    $minFloor = if ($Config.PricingMinIntervalSec) { [double]$Config.PricingMinIntervalSec } else { 0.4 }
+    $safetyFactor = if ($Config.PricingSafetyFactor) { [double]$Config.PricingSafetyFactor } else { 1.2 }
+    $jitterMaxMs = if ($Config.PricingJitterMaxMs) { [int]$Config.PricingJitterMaxMs } else { 500 }
+
+    $baseInterval = [Math]::Max($minFloor, $defaultInterval)
+    $limit = $RateLimitLimit -as [double]
+    if ($limit -and $limit -gt 0) {
+        $jitterSec = 0.0
+        if ($jitterMaxMs -gt 0) {
+            $jitterSec = (Get-Random -Minimum 0 -Maximum ($jitterMaxMs + 1)) / 1000.0
         }
+        $baseInterval = [Math]::Max($minFloor, ((1.0 / $limit) * $safetyFactor) + $jitterSec)
     }
 
     $script:RunStats.NextPricingAllowedAt = (Get-Date).AddSeconds($baseInterval + [double]$script:RunStats.PricingCooldownSec)
@@ -506,15 +511,34 @@ function Invoke-SpApiRequest {
 
             $params = @{ Method = $Method; Uri = $Uri; Headers = $Headers }
             if ($null -ne $Body -and "$Body" -ne '') { $params.Body = $Body }
+            if (($Method -eq 'Post' -or $Method -eq 'Put') -and $params.ContainsKey('Body')) {
+                $params.ContentType = 'application/json'
+            }
 
             $irmCommand = Get-Command -Name 'Invoke-RestMethod' -ErrorAction Stop
             if ($irmCommand.Parameters.ContainsKey('ResponseHeadersVariable')) {
                 $res = Invoke-RestMethod @params -ResponseHeadersVariable responseHeaders
             }
             else {
-                $res = Invoke-RestMethod @params
-                $responseHeaders = $null
-                Write-Log -Message "$Endpoint success: response headers unavailable on this PowerShell runtime" -LogPath $LogPath -Level 'WARN'
+                $iwrParams = @{ Method = $Method; Uri = $Uri; Headers = $Headers; UseBasicParsing = $true }
+                if ($params.ContainsKey('Body')) { $iwrParams.Body = $params.Body }
+                if ($params.ContainsKey('ContentType')) { $iwrParams.ContentType = $params.ContentType }
+
+                $web = Invoke-WebRequest @iwrParams
+                $responseHeaders = $web.Headers
+
+                $rawContent = if ($null -ne $web.Content) { [string]$web.Content } else { '' }
+                if (-not [string]::IsNullOrWhiteSpace($rawContent)) {
+                    try {
+                        $res = $rawContent | ConvertFrom-Json -Depth 20
+                    }
+                    catch {
+                        $res = $rawContent
+                    }
+                }
+                else {
+                    $res = $null
+                }
             }
 
             $limit = Get-HeaderValue -Headers $responseHeaders -Name 'x-amzn-RateLimit-Limit'

@@ -218,7 +218,7 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 
 - API呼び出し回数を抑えるため、同一JANは自動で集約処理されます。
 - Pricing呼び出しは基本直列で、最小間隔を保ちながら動的スロットリングします。
-- Catalog/Pricing で最小呼び出し間隔を別々に調整可能です（`CatalogMinIntervalSec` / `PricingMinIntervalSec`）。
+- Catalog/Pricing で呼び出し間隔を別々に調整可能です（Catalog: `CatalogMinIntervalSec`、Pricing: `PricingDefaultIntervalSec` / `PricingMinIntervalSec` / `PricingSafetyFactor` / `PricingJitterMaxMs`）。
 - 429/503 が増える場合は、バッチサイズを自動で 20→10→5 と段階縮小して成功率を優先します。
 - 件数が多い場合は実行時間が伸びるため、更新バッチを分けると切り分けしやすくなります。
 - 定期運用前に、少件数データで `output.xlsx` と `logs/run.log` の内容を一度確認することを推奨します。
