@@ -39,6 +39,7 @@ function Initialize-RunStats {
         NextPricingAllowedAt = Get-Date
         NextCatalogAllowedAt = Get-Date
         PricingCooldownSec = 0.0
+        PricingIntervalSec = 12.0
     }
 }
 
@@ -426,8 +427,13 @@ function Wait-ForPricingSlot {
     param([hashtable]$Config)
     if (-not $script:RunStats) { return }
 
+    $defaultInterval = if ($Config.PricingDefaultIntervalSec) { [double]$Config.PricingDefaultIntervalSec } else { 12.0 }
+    if (-not $script:RunStats.Contains('PricingIntervalSec')) {
+        $script:RunStats.PricingIntervalSec = $defaultInterval
+    }
+
     $now = Get-Date
-    $baseInterval = if ($Config.PricingDefaultIntervalSec) { [double]$Config.PricingDefaultIntervalSec } else { 12.0 }
+    $baseInterval = [double]$script:RunStats.PricingIntervalSec
     $target = if ($script:RunStats.NextPricingAllowedAt -gt $now) { $script:RunStats.NextPricingAllowedAt } else { $now }
     $waitSec = ($target - $now).TotalSeconds
     if ($waitSec -gt 0) {
@@ -435,7 +441,10 @@ function Wait-ForPricingSlot {
         Add-WaitMetric -Seconds $waitSec
     }
 
-    $script:RunStats.NextPricingAllowedAt = (Get-Date).AddSeconds($baseInterval + [double]$script:RunStats.PricingCooldownSec)
+    $candidateNext = (Get-Date).AddSeconds($baseInterval + [double]$script:RunStats.PricingCooldownSec)
+    if ($script:RunStats.NextPricingAllowedAt -lt $candidateNext) {
+        $script:RunStats.NextPricingAllowedAt = $candidateNext
+    }
 }
 
 function Wait-ForCatalogSlot {
@@ -485,7 +494,12 @@ function Update-PricingThrottleFromLimit {
         $baseInterval = [Math]::Max($minFloor, ((1.0 / $limit) * $safetyFactor) + $jitterSec)
     }
 
-    $script:RunStats.NextPricingAllowedAt = (Get-Date).AddSeconds($baseInterval + [double]$script:RunStats.PricingCooldownSec)
+    $script:RunStats.PricingIntervalSec = $baseInterval
+
+    $candidateNext = (Get-Date).AddSeconds($baseInterval + [double]$script:RunStats.PricingCooldownSec)
+    if ($script:RunStats.NextPricingAllowedAt -lt $candidateNext) {
+        $script:RunStats.NextPricingAllowedAt = $candidateNext
+    }
 }
 
 function Invoke-SpApiRequest {
@@ -988,7 +1002,8 @@ function Test-MultipackTitleCandidate {
     param([string]$Title)
 
     if ([string]::IsNullOrWhiteSpace($Title)) { return $false }
-    return ($Title -match '(\d+)(個|入り|入|パック|本|枚|セット)' -or $Title -match '×\s*\d+')
+    # 寸法(例: 10×20cm)の誤検知を避けるため、x/×数量は pack 指標付きのみ multipack 扱いにする。
+    return ($Title -match '(\d+)(個|入り|入|パック|本|枚|セット)' -or $Title -match '(?:×|x|X)\s*\d{1,3}\s*(個|入|入り|セット|pack|pcs|本|枚|袋)')
 }
 
 function Select-BestAsinForJan {
