@@ -961,7 +961,7 @@ function Get-AsinMapByJanBatch {
 
         if ($ParseStats) {
             if (-not $ParseStats.ContainsKey('ExpandedItems')) { $ParseStats.ExpandedItems = 0 }
-            if (-not $ParseStats.ContainsKey('ItemsWithoutIdentifiers')) { $ParseStats.ItemsWithoutIdentifiers = 0 }
+            if (-not $ParseStats.ContainsKey('WithoutIdentifiers')) { $ParseStats.WithoutIdentifiers = 0 }
             if (-not $ParseStats.ContainsKey('IdentifierCandidates')) { $ParseStats.IdentifierCandidates = 0 }
             if (-not $ParseStats.ContainsKey('MatchedIdentifiers')) { $ParseStats.MatchedIdentifiers = 0 }
             if (-not $ParseStats.ContainsKey('ItemsWithAsin')) { $ParseStats.ItemsWithAsin = 0 }
@@ -971,7 +971,7 @@ function Get-AsinMapByJanBatch {
             if ($ParseStats) { $ParseStats.ExpandedItems++ }
             $itemIdentifiers = Get-PropertyValue -Object $item -Name 'identifiers'
             if (-not $itemIdentifiers) {
-                if ($ParseStats) { $ParseStats.ItemsWithoutIdentifiers++ }
+                if ($ParseStats) { $ParseStats.WithoutIdentifiers++ }
                 continue
             }
 
@@ -1039,10 +1039,11 @@ function Get-AsinMapByJanBatch {
         $chunkJanLookupMap = @{}
         $chunkParseStats = @{
             ExpandedItems = 0
-            ItemsWithoutIdentifiers = 0
+            WithoutIdentifiers = 0
             IdentifierCandidates = 0
             MatchedIdentifiers = 0
             ItemsWithAsin = 0
+            Unresolved = 0
         }
         foreach ($jan in $chunk) {
             $resultMap[$jan] = $null
@@ -1149,6 +1150,7 @@ function Get-AsinMapByJanBatch {
         }
 
         $unresolvedJans = @($chunk | Where-Object { -not $resultMap[$_] })
+        $chunkParseStats.Unresolved = @($unresolvedJans).Count
         if (@($unresolvedJans).Count -gt 0) {
             $resolvedJans = @($chunk | Where-Object { $resultMap[$_] })
             Write-Log -Message "Catalog unresolved JAN detail: index=$index unresolved.count=$($unresolvedJans.Count) unresolved.list=$(Format-PreviewList -Items $unresolvedJans -MaxCount 30)" -LogPath $LogPath -Level 'WARN'
@@ -1157,8 +1159,8 @@ function Get-AsinMapByJanBatch {
             }
         }
         if ($chunkParseStats.Count -gt 0) {
-            Write-Log -Message "Catalog parse stats: index=$index size=$($chunk.Count) expanded=$($chunkParseStats.ExpandedItems) withoutIdentifiers=$($chunkParseStats.ItemsWithoutIdentifiers) identifierCandidates=$($chunkParseStats.IdentifierCandidates) matchedIdentifiers=$($chunkParseStats.MatchedIdentifiers) itemsWithAsin=$($chunkParseStats.ItemsWithAsin) unresolved=$($unresolvedJans.Count)" -LogPath $LogPath
-            if (($chunkParseStats.ExpandedItems -gt 0) -and ($chunkParseStats.ItemsWithoutIdentifiers -eq $chunkParseStats.ExpandedItems)) {
+            Write-Log -Message "Catalog parse stats: index=$index size=$($chunk.Count) expanded=$($chunkParseStats.ExpandedItems) withoutIdentifiers=$($chunkParseStats.WithoutIdentifiers) identifierCandidates=$($chunkParseStats.IdentifierCandidates) matchedIdentifiers=$($chunkParseStats.MatchedIdentifiers) itemsWithAsin=$($chunkParseStats.ItemsWithAsin) unresolved=$($chunkParseStats.Unresolved)" -LogPath $LogPath
+            if (($chunkParseStats.ExpandedItems -gt 0) -and ($chunkParseStats.WithoutIdentifiers -eq $chunkParseStats.ExpandedItems)) {
                 $propertySample = Get-CatalogItemPropertySample -Items $catalogItems
                 Write-Log -Message "Catalog parse diagnostic: expanded items have no identifiers (index=$index, item.props=$propertySample)" -LogPath $LogPath -Level 'WARN'
             }
@@ -1175,7 +1177,7 @@ function Get-AsinMapByJanBatch {
         if ($chunkParseStats.ExpandedItems -eq 0) {
             $chunkUnresolvedReason = 'CatalogNoItems'
         }
-        elseif (($chunkParseStats.ExpandedItems -gt 0) -and ($chunkParseStats.ItemsWithoutIdentifiers -eq $chunkParseStats.ExpandedItems)) {
+        elseif (($chunkParseStats.ExpandedItems -gt 0) -and ($chunkParseStats.WithoutIdentifiers -eq $chunkParseStats.ExpandedItems)) {
             $chunkUnresolvedReason = 'CatalogNoIdentifiers'
         }
         elseif (($chunkParseStats.IdentifierCandidates -eq 0) -and ($chunkParseStats.ExpandedItems -gt 0)) {
@@ -1812,10 +1814,11 @@ function Invoke-AmazonPriceUpdate {
                 }
             }
 
+            $sheet.Cells.Item($row, 9).Value2 = ''
+
             if ([string]::IsNullOrWhiteSpace($jan)) {
                 $sheet.Cells.Item($row, 7).Value2 = ''
                 $sheet.Cells.Item($row, 8).Value2 = ''
-                $sheet.Cells.Item($row, 9).Value2 = ''
                 continue
             }
 
@@ -1824,7 +1827,6 @@ function Invoke-AmazonPriceUpdate {
                 if ($result -and ($result.cache_status -eq 'not_found' -or $result.cache_status -eq 'transient_error')) {
                     $sheet.Cells.Item($row, 7).Value2 = ''
                     $sheet.Cells.Item($row, 8).Value2 = ''
-                    $sheet.Cells.Item($row, 9).Value2 = ''
                     if ($result.cache_status -eq 'transient_error') {
                         Write-Log -Message "行$row JAN=$jan は一時エラーのため空欄出力します。" -LogPath $logPath -Level 'WARN'
                     }
@@ -1834,11 +1836,9 @@ function Invoke-AmazonPriceUpdate {
                 $sheet.Cells.Item($row, 7).Value2 = if ($result -and $result.asin) { $result.asin } else { '' }
                 if ($result -and $null -ne $result.price -and "$($result.price)" -ne '') {
                     $sheet.Cells.Item($row, 8).Value2 = [double]$result.price
-                    $sheet.Cells.Item($row, 9).Value2 = ''
                 }
                 else {
                     $sheet.Cells.Item($row, 8).Value2 = ''
-                    $sheet.Cells.Item($row, 9).Value2 = ''
                 }
             }
             catch {
@@ -1849,7 +1849,6 @@ function Invoke-AmazonPriceUpdate {
 
                 $sheet.Cells.Item($row, 7).Value2 = ''
                 $sheet.Cells.Item($row, 8).Value2 = ''
-                $sheet.Cells.Item($row, 9).Value2 = ''
                 Write-Log -Message "行$row JAN=$jan の処理でエラー: 分類=$($detail.Class), HTTP=$($detail.StatusCode), msg=$($_.Exception.Message)" -LogPath $logPath -Level 'ERROR'
             }
 
