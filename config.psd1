@@ -10,7 +10,8 @@
     PricingBatchSize  = 20
     PricingSingleFallbackThreshold = 3
     PricingMinIntervalSec = 2.2
-    DebugSpApiResponse = $false
+    CatalogMinIntervalSec = 1.2
+    DebugSpApiResponse = $true
     DebugSpApiResponseMaxChars = 4000
     JanAsinCacheTtlHours = 168
     OfferCacheTtlHours   = 24

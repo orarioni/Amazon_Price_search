@@ -11,7 +11,7 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 - 結果を `output.xlsx` の以下列に出力
   - G列: ASIN
   - H列: 新品送料込み最安
-  - I列: 価格取得日時（ISO 8601）
+  - I列: 未使用（空欄）
 - 同一JANの重複をまとめて処理し、APIコール数を削減
 - 永続キャッシュ（`cache/price_cache.json`）で24時間以内の再取得を抑制
 - 価格履歴を日次追記（`cache/history/prices_YYYY-MM-DD.jsonl`）
@@ -76,7 +76,7 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 
 - **G列（7列目）**: ASIN
 - **H列（8列目）**: 新品送料込み最安価格
-- **I列（9列目）**: 価格取得日時（ISO 8601）
+- **I列（9列目）**: 未使用（空欄）
 
 補足:
 
@@ -171,7 +171,7 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 
 **対処**:
 - JANの桁・値を再確認
-- 本ツールは Catalog API で **JAN検索→未解決分のみEANフォールバック検索** を実施済み（`identifiersType=JAN` 後に `identifiersType=EAN`）
+- 本ツールは Catalog API で `identifiersType=JAN` による検索のみを実施します（EANフォールバックは無効化）
 - 必要に応じて Amazon 側で商品存在を確認
 - `logs/run.log` の該当JANの分類ログを確認
 
@@ -218,6 +218,7 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 
 - API呼び出し回数を抑えるため、同一JANは自動で集約処理されます。
 - Pricing呼び出しは基本直列で、最小間隔を保ちながら動的スロットリングします。
+- Catalog/Pricing で最小呼び出し間隔を別々に調整可能です（`CatalogMinIntervalSec` / `PricingMinIntervalSec`）。
 - 429/503 が増える場合は、バッチサイズを自動で 20→10→5 と段階縮小して成功率を優先します。
 - 件数が多い場合は実行時間が伸びるため、更新バッチを分けると切り分けしやすくなります。
 - 定期運用前に、少件数データで `output.xlsx` と `logs/run.log` の内容を一度確認することを推奨します。
