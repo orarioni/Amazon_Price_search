@@ -1663,10 +1663,10 @@ function Invoke-AmazonPriceUpdate {
         $workbook = $excel.Workbooks.Open($inputPath)
         $sheet = $workbook.Worksheets.Item(1)
         
-        # Set headers for G, H, I columns
+        # Set headers for G, H columns (I列は空欄維持)
         $sheet.Cells.Item(1, 7).Value2 = 'ASIN'
         $sheet.Cells.Item(1, 8).Value2 = '価格'
-        $sheet.Cells.Item(1, 9).Value2 = '取得日時'
+        $sheet.Cells.Item(1, 9).Value2 = ''
         
         $lastRow = $sheet.Cells($sheet.Rows.Count, 2).End(-4162).Row
         $totalDataRows = [Math]::Max(0, $lastRow - 1)
@@ -1834,7 +1834,7 @@ function Invoke-AmazonPriceUpdate {
                 $sheet.Cells.Item($row, 7).Value2 = if ($result -and $result.asin) { $result.asin } else { '' }
                 if ($result -and $null -ne $result.price -and "$($result.price)" -ne '') {
                     $sheet.Cells.Item($row, 8).Value2 = [double]$result.price
-                    $sheet.Cells.Item($row, 9).Value2 = if ($result.fetched_at) { [string]$result.fetched_at } else { '' }
+                    $sheet.Cells.Item($row, 9).Value2 = ''
                 }
                 else {
                     $sheet.Cells.Item($row, 8).Value2 = ''
