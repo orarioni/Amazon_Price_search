@@ -13,6 +13,9 @@
     PricingMinIntervalSec = 0.4
     PricingSafetyFactor = 1.2
     PricingJitterMaxMs = 500
+    CandidateMaxAsinsPerJan = 5
+    AvoidMultipackByTitle = $true
+    MultipackTitlePenalty = 999999
     CatalogMinIntervalSec = 1.2
     DebugSpApiResponse = $true
     DebugSpApiResponseMaxChars = 4000

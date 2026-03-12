@@ -967,6 +967,80 @@ function Get-LowestNewPriceFromOffers {
     return $fallbackMin
 }
 
+function Get-CandidateTitleByItem {
+    param([object]$Item)
+
+    if (-not $Item) { return $null }
+
+    $summaries = Get-PropertyValue -Object $Item -Name 'summaries'
+    foreach ($summary in @(ConvertTo-ObjectArray -Value $summaries)) {
+        $title = [string](Get-PropertyValue -Object $summary -Name 'itemName')
+        if (-not [string]::IsNullOrWhiteSpace($title)) { return $title }
+    }
+
+    $titleDirect = [string](Get-PropertyValue -Object $Item -Name 'title')
+    if (-not [string]::IsNullOrWhiteSpace($titleDirect)) { return $titleDirect }
+
+    return $null
+}
+
+function Test-MultipackTitleCandidate {
+    param([string]$Title)
+
+    if ([string]::IsNullOrWhiteSpace($Title)) { return $false }
+    return ($Title -match '(\d+)(個|入り|入|パック|本|枚|セット)' -or $Title -match '×\s*\d+')
+}
+
+function Select-BestAsinForJan {
+    param(
+        [array]$CandidateAsins,
+        [hashtable]$PriceByAsin,
+        [hashtable]$TitleByAsin,
+        [hashtable]$Config
+    )
+
+    if (-not $CandidateAsins -or -not $PriceByAsin) {
+        return [PSCustomObject]@{ Asin = $null; Price = $null; EffectivePrice = $null }
+    }
+
+    $avoidMultipack = $false
+    if ($null -ne $Config -and $Config.ContainsKey('AvoidMultipackByTitle')) {
+        $avoidMultipack = [bool]$Config.AvoidMultipackByTitle
+    }
+
+    $multipackPenalty = 999999
+    if ($null -ne $Config -and $Config.ContainsKey('MultipackTitlePenalty')) {
+        $multipackPenalty = [decimal]$Config.MultipackTitlePenalty
+    }
+
+    $bestAsin = $null
+    $bestPrice = $null
+    $bestEffectivePrice = $null
+
+    foreach ($asin in @($CandidateAsins)) {
+        if ([string]::IsNullOrWhiteSpace([string]$asin)) { continue }
+        if (-not $PriceByAsin.ContainsKey($asin)) { continue }
+
+        $basePrice = $PriceByAsin[$asin]
+        if ($null -eq $basePrice -or "$basePrice" -eq '') { continue }
+
+        $effectivePrice = [decimal]$basePrice
+        if ($avoidMultipack -and $TitleByAsin -and $TitleByAsin.ContainsKey($asin)) {
+            if (Test-MultipackTitleCandidate -Title ([string]$TitleByAsin[$asin])) {
+                $effectivePrice = $effectivePrice + $multipackPenalty
+            }
+        }
+
+        if ($null -eq $bestEffectivePrice -or $effectivePrice -lt $bestEffectivePrice -or ($effectivePrice -eq $bestEffectivePrice -and [string]$asin -lt [string]$bestAsin)) {
+            $bestAsin = [string]$asin
+            $bestPrice = [decimal]$basePrice
+            $bestEffectivePrice = $effectivePrice
+        }
+    }
+
+    return [PSCustomObject]@{ Asin = $bestAsin; Price = $bestPrice; EffectivePrice = $bestEffectivePrice }
+}
+
 function Get-AsinMapByJanBatch {
     param(
         [array]$Jans,
@@ -979,6 +1053,10 @@ function Get-AsinMapByJanBatch {
     $resultMap = @{}
     $errorClassMap = @{}
     $errorReasonMap = @{}
+    $candidateAsinsMap = @{}
+    $candidateTitleMap = @{}
+    $candidateMaxAsinsPerJan = if ($Config.CandidateMaxAsinsPerJan) { [int]$Config.CandidateMaxAsinsPerJan } else { 5 }
+    if ($candidateMaxAsinsPerJan -lt 1) { $candidateMaxAsinsPerJan = 1 }
     $minBatchSize = 5
     $batchSize = [Math]::Max($minBatchSize, [int]$Config.CatalogBatchSize)
     $index = 0
@@ -989,7 +1067,10 @@ function Get-AsinMapByJanBatch {
             [hashtable]$TargetMap,
             [hashtable]$TargetErrorClassMap,
             [hashtable]$TargetJanLookupMap,
-            [hashtable]$ParseStats
+            [hashtable]$ParseStats,
+            [hashtable]$CandidateAsinsMap,
+            [hashtable]$CandidateTitleMap,
+            [int]$CandidateMaxAsinsPerJan
         )
 
         if (-not $Items) { return }
@@ -1059,7 +1140,25 @@ function Get-AsinMapByJanBatch {
             $asin = [string](Get-PropertyValue -Object $item -Name 'asin')
             if ($matchedIdentifier -and -not [string]::IsNullOrWhiteSpace($asin)) {
                 if ($ParseStats) { $ParseStats.ItemsWithAsin++ }
-                $TargetMap[$matchedIdentifier] = $asin
+                if (-not $CandidateAsinsMap.ContainsKey($matchedIdentifier)) {
+                    $CandidateAsinsMap[$matchedIdentifier] = New-Object System.Collections.Generic.HashSet[string]
+                }
+                $candidateSet = $CandidateAsinsMap[$matchedIdentifier]
+                if ($candidateSet.Count -lt $CandidateMaxAsinsPerJan) {
+                    [void]$candidateSet.Add($asin)
+                }
+
+                if (-not $CandidateTitleMap.ContainsKey($matchedIdentifier)) {
+                    $CandidateTitleMap[$matchedIdentifier] = @{}
+                }
+                $titleByAsin = $CandidateTitleMap[$matchedIdentifier]
+                if (-not $titleByAsin.ContainsKey($asin)) {
+                    $titleByAsin[$asin] = Get-CandidateTitleByItem -Item $item
+                }
+
+                if (-not $TargetMap[$matchedIdentifier]) {
+                    $TargetMap[$matchedIdentifier] = $asin
+                }
                 $TargetErrorClassMap.Remove($matchedIdentifier) | Out-Null
                 $errorReasonMap.Remove($matchedIdentifier) | Out-Null
             }
@@ -1091,7 +1190,7 @@ function Get-AsinMapByJanBatch {
 
         $identifiers = ($chunk | ForEach-Object { $_.Trim() }) -join ','
         $catalogPageSize = [Math]::Min($batchSize, 20)
-        $baseUri = "$($Config.SpApiBaseUrl)/catalog/2022-04-01/items?identifiers=$([Uri]::EscapeDataString($identifiers))&identifiersType=JAN&marketplaceIds=$($Config.MarketplaceId)&includedData=identifiers&pageSize=$catalogPageSize"
+        $baseUri = "$($Config.SpApiBaseUrl)/catalog/2022-04-01/items?identifiers=$([Uri]::EscapeDataString($identifiers))&identifiersType=JAN&marketplaceIds=$($Config.MarketplaceId)&includedData=identifiers,summaries&pageSize=$catalogPageSize"
         Write-Log -Message "JAN検索: $($chunk.Count)件 (index=$index,size=$batchSize,pageSize=$catalogPageSize)" -LogPath $LogPath
 
         $res = $null
@@ -1181,7 +1280,7 @@ function Get-AsinMapByJanBatch {
         foreach ($pageRes in @($pageResponses)) {
             $catalogItemsPage = Get-PropertyValue -Object $pageRes -Name 'items'
             $catalogItems += @(Expand-CatalogItems -Items $catalogItemsPage)
-            & $applyCatalogItems -Items $catalogItemsPage -TargetMap $resultMap -TargetErrorClassMap $errorClassMap -TargetJanLookupMap $chunkJanLookupMap -ParseStats $chunkParseStats | Out-Null
+            & $applyCatalogItems -Items $catalogItemsPage -TargetMap $resultMap -TargetErrorClassMap $errorClassMap -TargetJanLookupMap $chunkJanLookupMap -ParseStats $chunkParseStats -CandidateAsinsMap $candidateAsinsMap -CandidateTitleMap $candidateTitleMap -CandidateMaxAsinsPerJan $candidateMaxAsinsPerJan | Out-Null
         }
 
         $unresolvedJans = @($chunk | Where-Object { -not $resultMap[$_] })
@@ -1246,7 +1345,12 @@ function Get-AsinMapByJanBatch {
         $index = $end + 1
     }
 
-    [PSCustomObject]@{ AsinMap = $resultMap; ErrorClassMap = $errorClassMap; ErrorReasonMap = $errorReasonMap }
+    $candidateAsinsMapResult = @{}
+    foreach ($jan in $candidateAsinsMap.Keys) {
+        $candidateAsinsMapResult[$jan] = @($candidateAsinsMap[$jan].ToArray() | Sort-Object)
+    }
+
+    [PSCustomObject]@{ AsinMap = $resultMap; CandidateAsinsMap = $candidateAsinsMapResult; CandidateTitleMap = $candidateTitleMap; ErrorClassMap = $errorClassMap; ErrorReasonMap = $errorReasonMap }
 }
 
 
@@ -1748,20 +1852,27 @@ function Invoke-AmazonPriceUpdate {
         if ($needApiJans.Count -gt 0) {
             $catalogResult = Get-AsinMapByJanBatch -Jans $needApiJans -AccessToken $accessToken -Config $Config -LogPath $logPath -AuthContext $authContext
             $asinMap = $catalogResult.AsinMap
+            $candidateAsinsMap = if ($catalogResult.CandidateAsinsMap) { $catalogResult.CandidateAsinsMap } else { @{} }
+            $candidateTitleMap = if ($catalogResult.CandidateTitleMap) { $catalogResult.CandidateTitleMap } else { @{} }
             $catalogErrorMap = $catalogResult.ErrorClassMap
             $catalogApiCalls = $script:RunStats.CatalogBatchCalls
 
-            $allAsins = @($asinMap.Values | Where-Object { $_ } | Sort-Object -Unique)
+            $priceMap = @{}
+            $priceErrorMap = @{}
+            $allCandidateAsins = @()
+            foreach ($jan in $needApiJans) {
+                if ($candidateAsinsMap.ContainsKey($jan)) {
+                    $allCandidateAsins += @($candidateAsinsMap[$jan])
+                }
+                elseif ($asinMap[$jan]) {
+                    $allCandidateAsins += @([string]$asinMap[$jan])
+                }
+            }
+            $allAsins = @($allCandidateAsins | Where-Object { $_ } | Sort-Object -Unique)
             $uniqueAsinCount = $allAsins.Count
 
             $needPriceAsins = @()
-            $priceMap = @{}
-            $priceErrorMap = @{}
-
-            foreach ($jan in $needApiJans) {
-                $asin = $asinMap[$jan]
-                if (-not $asin) { continue }
-
+            foreach ($asin in $allAsins) {
                 $offerKey = Get-OfferCacheKey -MarketplaceId $Config.MarketplaceId -Condition 'New' -Asin $asin
                 if ($persistentCache.ContainsKey($offerKey) -and (Test-CacheFreshByStatus -Entry $persistentCache[$offerKey] -Config $Config -CacheKind 'offer')) {
                     $cachedOffer = $persistentCache[$offerKey]
@@ -1787,10 +1898,12 @@ function Invoke-AmazonPriceUpdate {
             $fetchedAt = (Get-Date).ToString('o')
             foreach ($jan in $needApiJans) {
                 $cacheStatus = 'ok'
-                $asin = $asinMap[$jan]
+                $asin = $null
                 $price = $null
+                $candidateAsins = if ($candidateAsinsMap.ContainsKey($jan)) { @($candidateAsinsMap[$jan]) } elseif ($asinMap[$jan]) { @([string]$asinMap[$jan]) } else { @() }
+                $titleByAsin = if ($candidateTitleMap.ContainsKey($jan)) { $candidateTitleMap[$jan] } else { @{} }
 
-                if (-not $asin) {
+                if ($candidateAsins.Count -eq 0) {
                     if ($catalogErrorMap.ContainsKey($jan) -and $catalogErrorMap[$jan] -eq 'NotFound/Validation') {
                         $cacheStatus = 'not_found'; $notFoundValidationCount++
                     }
@@ -1805,8 +1918,14 @@ function Invoke-AmazonPriceUpdate {
                     }
                 }
                 else {
-                    if ($priceMap.ContainsKey($asin)) { $price = $priceMap[$asin] }
-                    if ($priceErrorMap.ContainsKey($asin)) {
+                    $selection = Select-BestAsinForJan -CandidateAsins $candidateAsins -PriceByAsin $priceMap -TitleByAsin $titleByAsin -Config $Config
+                    $asin = $selection.Asin
+                    $price = $selection.Price
+                    if ($Config.DebugSpApiResponse) { Write-Log -Message "JAN選定: jan=$jan candidate_count=$($candidateAsins.Count) chosen_asin=$asin chosen_price=$price" -LogPath $logPath }
+                    if (-not $asin) {
+                        $cacheStatus = 'not_found'; $notFoundValidationCount++
+                    }
+                    elseif ($priceErrorMap.ContainsKey($asin)) {
                         $errClass = $priceErrorMap[$asin]
                         if ($errClass -eq 'NotFound/Validation') {
                             $cacheStatus = 'not_found'; $notFoundValidationCount++

@@ -6,8 +6,8 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 ## できること
 
 - Excel（B列のJAN）を読み取り、JANごとに Amazon カタログ検索を実行
-- JAN から ASIN を解決（見つからない場合は空欄）
-- ASINごとに新品オファーを取得し、**送料込み最安**を算出
+- JAN から候補ASINを解決（見つからない場合は空欄、候補数は上限あり）
+- 候補ASINの新品オファーから、**送料込み最安**のASINを採用
 - 結果を `output.xlsx` の以下列に出力
   - G列: ASIN
   - H列: 新品送料込み最安
@@ -88,7 +88,9 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 ### 「最安」の定義（運用ルール）
 
 - 対象コンディション: **New**（`ItemCondition=New`）
+- JANに複数ASIN候補がある場合は、候補内で送料込み最安のASINを採用（同額時はASIN辞書順）
 - 価格計算: `LandedPrice` を優先。無い場合は `ListingPrice + Shipping`
+- `AvoidMultipackByTitle=$true` の場合、タイトルに「20個入り」「×2」等のマルチパック疑いがある候補へ `MultipackTitlePenalty` を加算して選定
 - Prime可否・出荷元/販売元・ポイント還元は現状の最安判定には含めない
 - 上記ルールを変える場合は、社内運用ルールとして事前に合意してから設定/実装を変更してください
 
@@ -120,6 +122,8 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 - ASIN→Offers キャッシュTTL: 24時間（`OfferCacheTtlHours`）
 - negative cache TTL: 12時間（`NegativeCacheTtlHours`）
 - SP-API応答デバッグ: `DebugSpApiResponse=$true` で要点ログ（`status / errors / request.uri / payload.ASIN / Offers.Count`）をターミナルとログへ出力
+- Catalog候補上限: `CandidateMaxAsinsPerJan`（既定5）
+- マルチパック疑い対策: `AvoidMultipackByTitle`, `MultipackTitlePenalty`
 - 応答全文の出力上限: `DebugSpApiResponseMaxChars`（既定 4000 文字、機微情報はマスク）
 - `ok` / `not_found` はキャッシュ保持
 - `transient_error` は永続化しない（次回再取得）
