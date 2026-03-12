@@ -9,7 +9,13 @@
     CatalogBatchSize  = 20
     PricingBatchSize  = 20
     PricingSingleFallbackThreshold = 3
-    PricingMinIntervalSec = 2.2
+    PricingDefaultIntervalSec = 12.0
+    PricingMinIntervalSec = 0.4
+    PricingSafetyFactor = 1.2
+    PricingJitterMaxMs = 500
+    CandidateMaxAsinsPerJan = 5
+    AvoidMultipackByTitle = $true
+    MultipackTitlePenalty = 999999
     CatalogMinIntervalSec = 1.2
     DebugSpApiResponse = $true
     DebugSpApiResponseMaxChars = 4000
