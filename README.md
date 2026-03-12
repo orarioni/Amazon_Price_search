@@ -11,7 +11,7 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 - 結果を `output.xlsx` の以下列に出力
   - G列: ASIN
   - H列: 新品送料込み最安
-  - I列: 未使用（空欄）
+  - I列: 未使用（常に空欄）
 - 同一JANの重複をまとめて処理し、APIコール数を削減
 - 永続キャッシュ（`cache/price_cache.json`）で24時間以内の再取得を抑制
 - 価格履歴を日次追記（`cache/history/prices_YYYY-MM-DD.jsonl`）
@@ -76,7 +76,7 @@ Amazon Selling Partner API（SP-API）を使って、`data/input.xlsx` にある
 
 - **G列（7列目）**: ASIN
 - **H列（8列目）**: 新品送料込み最安価格
-- **I列（9列目）**: 未使用（空欄）
+- **I列（9列目）**: 未使用（常に空欄）
 
 補足:
 
