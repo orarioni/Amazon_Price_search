@@ -82,20 +82,29 @@ function Get-StatusCodeValue {
 
     if ($null -eq $Status) { return $null }
 
-    $direct = $Status -as [int]
-    if ($null -ne $direct) { return $direct }
+    if ($Status -is [int] -or $Status -is [long] -or $Status -is [double] -or $Status -is [decimal]) {
+        return [int]$Status
+    }
+
+    if ($Status -is [string]) {
+        $statusText = $Status.Trim()
+        if ($statusText -match '^\d+$') {
+            return [int]$statusText
+        }
+        return $null
+    }
 
     $statusCode = Get-PropertyValue -Object $Status -Name 'statusCode'
     if ($null -eq $statusCode) {
         $statusCode = Get-PropertyValue -Object $Status -Name 'StatusCode'
     }
-    $fromProp = $statusCode -as [int]
+    $fromProp = Get-StatusCodeValue -Status $statusCode
     if ($null -ne $fromProp) { return $fromProp }
 
     if ($Status -is [System.Collections.IDictionary]) {
         foreach ($k in @('statusCode', 'StatusCode')) {
             if ($Status.Contains($k)) {
-                $fromDict = $Status[$k] -as [int]
+                $fromDict = Get-StatusCodeValue -Status $Status[$k]
                 if ($null -ne $fromDict) { return $fromDict }
             }
         }
@@ -364,7 +373,8 @@ function Write-SpApiResponseDebugLog {
             $index++
             $statusRaw = Get-PropertyValue -Object $item -Name 'status'
             $statusCode = Get-StatusCodeValue -Status $statusRaw
-            $status = if ($null -ne $statusCode) { $statusCode } else { $statusRaw }
+            # Guard known crash: status can be PSCustomObject/hashtable and must never be cast directly to [int].
+            $status = if ($null -ne $statusCode) { $statusCode } else { '' }
             $request = Get-PropertyValue -Object $item -Name 'request'
             $requestUri = Get-PropertyValue -Object $request -Name 'uri'
             $body = Get-PropertyValue -Object $item -Name 'body'
@@ -382,7 +392,8 @@ function Write-SpApiResponseDebugLog {
     else {
         $statusRaw = Get-PropertyValue -Object $Response -Name 'status'
         $statusCode = Get-StatusCodeValue -Status $statusRaw
-        $status = if ($null -ne $statusCode) { $statusCode } else { $statusRaw }
+        # Guard known crash: status can be PSCustomObject/hashtable and must never be cast directly to [int].
+        $status = if ($null -ne $statusCode) { $statusCode } else { '' }
         $payload = Get-PropertyValue -Object $Response -Name 'payload'
         $errors = Get-PropertyValue -Object $Response -Name 'errors'
         $requestUri = Get-PropertyValue -Object $Response -Name 'uri'
