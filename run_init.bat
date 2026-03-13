@@ -16,7 +16,7 @@ set "EXIT_CODE=%ERRORLEVEL%"
 
 if %EXIT_CODE% neq 0 (
   echo.
-  echo [ERROR] 初期設定に失敗しました。メッセージを確認してください。 (ExitCode=%EXIT_CODE%)
+  echo [ERROR] Init failed. See logs\run.log (ExitCode=%EXIT_CODE%)
   exit /b %EXIT_CODE%
 )
 
