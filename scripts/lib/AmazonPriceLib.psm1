@@ -1196,6 +1196,10 @@ function Get-AsinMapByJanBatch {
         }
         foreach ($jan in $chunk) {
             $resultMap[$jan] = $null
+            $candidateAsinsMap[$jan] = New-Object System.Collections.Generic.HashSet[string]
+            if (-not $candidateTitleMap.ContainsKey($jan)) { $candidateTitleMap[$jan] = @{} }
+            if (-not $errorClassMap.ContainsKey($jan)) { $errorClassMap[$jan] = $null }
+            if (-not $errorReasonMap.ContainsKey($jan)) { $errorReasonMap[$jan] = $null }
             foreach ($lookupKey in (Get-IdentifierMatchKeys -Identifier ([string]$jan))) {
                 if (-not $chunkJanLookupMap.ContainsKey($lookupKey)) {
                     $chunkJanLookupMap[$lookupKey] = [string]$jan
@@ -1361,8 +1365,12 @@ function Get-AsinMapByJanBatch {
     }
 
     $candidateAsinsMapResult = @{}
-    foreach ($jan in $candidateAsinsMap.Keys) {
-        $candidateAsinsMapResult[$jan] = @($candidateAsinsMap[$jan].ToArray() | Sort-Object)
+    foreach ($jan in $resultMap.Keys) {
+        $candidateList = @($candidateAsinsMap[$jan])
+        if ($candidateAsinsMap[$jan] -is [System.Collections.Generic.HashSet[string]]) {
+            $candidateList = @($candidateAsinsMap[$jan].ToArray())
+        }
+        $candidateAsinsMapResult[$jan] = @($candidateList | Where-Object { $_ } | Sort-Object -Unique)
     }
 
     [PSCustomObject]@{ AsinMap = $resultMap; CandidateAsinsMap = $candidateAsinsMapResult; CandidateTitleMap = $candidateTitleMap; ErrorClassMap = $errorClassMap; ErrorReasonMap = $errorReasonMap }
@@ -1866,10 +1874,10 @@ function Invoke-AmazonPriceUpdate {
         $uniqueAsinCount = 0
         if ($needApiJans.Count -gt 0) {
             $catalogResult = Get-AsinMapByJanBatch -Jans $needApiJans -AccessToken $accessToken -Config $Config -LogPath $logPath -AuthContext $authContext
-            $asinMap = $catalogResult.AsinMap
-            $candidateAsinsMap = if ($catalogResult.CandidateAsinsMap) { $catalogResult.CandidateAsinsMap } else { @{} }
-            $candidateTitleMap = if ($catalogResult.CandidateTitleMap) { $catalogResult.CandidateTitleMap } else { @{} }
-            $catalogErrorMap = $catalogResult.ErrorClassMap
+            $asinMap = if ($catalogResult.AsinMap -is [hashtable]) { $catalogResult.AsinMap } else { @{} }
+            $candidateAsinsMap = if ($catalogResult.CandidateAsinsMap -is [hashtable]) { $catalogResult.CandidateAsinsMap } else { @{} }
+            $candidateTitleMap = if ($catalogResult.CandidateTitleMap -is [hashtable]) { $catalogResult.CandidateTitleMap } else { @{} }
+            $catalogErrorMap = if ($catalogResult.ErrorClassMap -is [hashtable]) { $catalogResult.ErrorClassMap } else { @{} }
             $catalogApiCalls = $script:RunStats.CatalogBatchCalls
 
             $priceMap = @{}
@@ -1877,7 +1885,8 @@ function Invoke-AmazonPriceUpdate {
             $allCandidateAsins = @()
             foreach ($jan in $needApiJans) {
                 if ($candidateAsinsMap.ContainsKey($jan)) {
-                    $allCandidateAsins += @($candidateAsinsMap[$jan])
+                    $candidates = @($candidateAsinsMap[$jan])
+                    $allCandidateAsins += $candidates
                 }
                 elseif ($asinMap[$jan]) {
                     $allCandidateAsins += @([string]$asinMap[$jan])
@@ -1902,6 +1911,10 @@ function Invoke-AmazonPriceUpdate {
                 }
             }
 
+            if ($allAsins.Count -eq 0) {
+                # Guard for the known crash path when all Catalog responses are empty.
+                Write-Log -Message 'No candidate ASINs found; skipping pricing.' -LogPath $logPath
+            }
             if ($needPriceAsins.Count -gt 0) {
                 $distinctAsins = @($needPriceAsins | Sort-Object -Unique)
                 $pricingResult = Get-PriceMapByAsinBatch -Asins $distinctAsins -AccessToken $accessToken -Config $Config -LogPath $logPath -AuthContext $authContext
@@ -1916,6 +1929,7 @@ function Invoke-AmazonPriceUpdate {
                 $asin = $null
                 $price = $null
                 $candidateAsins = if ($candidateAsinsMap.ContainsKey($jan)) { @($candidateAsinsMap[$jan]) } elseif ($asinMap[$jan]) { @([string]$asinMap[$jan]) } else { @() }
+                $candidateAsins = @($candidateAsins)
                 $titleByAsin = if ($candidateTitleMap.ContainsKey($jan)) { $candidateTitleMap[$jan] } else { @{} }
 
                 if ($candidateAsins.Count -eq 0) {
