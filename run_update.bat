@@ -1,10 +1,12 @@
 @echo off
-chcp 65001 >nul
+setlocal
 cd /d "%~dp0"
-powershell -NoProfile -ExecutionPolicy Bypass -File ".\scripts\10_update_excel.ps1"
+
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\10_update_excel.ps1"
 if errorlevel 1 (
   echo.
-  echo [ERROR] 更新処理に失敗しました。メッセージを確認してください。
+  echo [ERROR] Update failed. See logs\run.log
   exit /b 1
 )
+
 exit /b 0
