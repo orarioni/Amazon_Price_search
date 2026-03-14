@@ -292,7 +292,11 @@ function Expand-CatalogItems {
 }
 
 function ConvertFrom-JsonIfNeeded {
-    param([object]$Value)
+    param(
+        [object]$Value,
+        [string]$Context,
+        [string]$LogPath
+    )
 
     if ($null -eq $Value) {
         return $null
@@ -303,9 +307,25 @@ function ConvertFrom-JsonIfNeeded {
         $trimmed = $text.TrimStart()
         if ($trimmed.StartsWith('{') -or $trimmed.StartsWith('[')) {
             try {
-                return ($text | ConvertFrom-Json -Depth 100)
+                $parsed = ($text | ConvertFrom-Json -Depth 100)
+                if ($LogPath) {
+                    $parsedType = if ($null -ne $parsed) { $parsed.GetType().FullName } else { '<null>' }
+                    $ctx = if ([string]::IsNullOrWhiteSpace($Context)) { 'SP-API' } else { $Context }
+                    Write-Log -Message "$ctx json-normalize: parsed successfully. type=$parsedType" -LogPath $LogPath
+                }
+                return $parsed
             }
             catch {
+                if ($LogPath) {
+                    $ctx = if ([string]::IsNullOrWhiteSpace($Context)) { 'SP-API' } else { $Context }
+                    $maxChars = 400
+                    $safePreview = Mask-SensitiveText -Text $text
+                    if ($safePreview.Length -gt $maxChars) {
+                        $safePreview = "$($safePreview.Substring(0, $maxChars))...(truncated)"
+                    }
+                    Write-Log -Message "$ctx json-normalize: parse failed: $($_.Exception.Message)" -LogPath $LogPath -Level 'WARN'
+                    Write-Log -Message "$ctx json-normalize raw.preview: $safePreview" -LogPath $LogPath -Level 'WARN'
+                }
                 return $Value
             }
         }
@@ -652,7 +672,10 @@ function Invoke-SpApiRequest {
                 }
             }
 
-            $res = ConvertFrom-JsonIfNeeded -Value $res
+            $res = ConvertFrom-JsonIfNeeded -Value $res -Context $Endpoint -LogPath $LogPath
+
+            $normalizedType = if ($null -ne $res) { $res.GetType().FullName } else { '<null>' }
+            Write-Log -Message "$Endpoint normalized response.type=$normalizedType" -LogPath $LogPath
 
             $limit = Get-HeaderValue -Headers $responseHeaders -Name 'x-amzn-RateLimit-Limit'
             $requestId = Get-HeaderValue -Headers $responseHeaders -Name 'x-amzn-RequestId'
@@ -1366,6 +1389,18 @@ function Get-AsinMapByJanBatch {
 
             $pageResponses += @($res)
             $catalogItemsPage = Get-PropertyValue -Object $res -Name 'items'
+            if (@($catalogItemsPage).Count -eq 0) {
+                $responseAsArray = @($res)
+                if (@($responseAsArray).Count -gt 0) {
+                    $firstCandidate = $responseAsArray[0]
+                    $firstHasAsin = -not [string]::IsNullOrWhiteSpace([string](Get-PropertyValue -Object $firstCandidate -Name 'asin'))
+                    $firstHasIdentifiers = $null -ne (Get-PropertyValue -Object $firstCandidate -Name 'identifiers')
+                    if ($firstHasAsin -or $firstHasIdentifiers) {
+                        $catalogItemsPage = $responseAsArray
+                        Write-Log -Message "Catalog page fetch fallback: using response root as items (index=$index,page=$pageNumber,type=$(Get-ObjectTypeName -Value $res),count=$(@($responseAsArray).Count))" -LogPath $LogPath
+                    }
+                }
+            }
             $expandedItemsPageCount = @(Expand-CatalogItems -Items $catalogItemsPage).Count
             $pagination = Get-PropertyValue -Object $res -Name 'pagination'
             $nextTokenCandidate = [string](Get-PropertyValue -Object $pagination -Name 'nextToken')
@@ -1412,6 +1447,18 @@ function Get-AsinMapByJanBatch {
         $catalogItems = @()
         foreach ($pageRes in @($pageResponses)) {
             $catalogItemsPage = Get-PropertyValue -Object $pageRes -Name 'items'
+            if (@($catalogItemsPage).Count -eq 0) {
+                $pageResAsArray = @($pageRes)
+                if (@($pageResAsArray).Count -gt 0) {
+                    $firstCandidate = $pageResAsArray[0]
+                    $firstHasAsin = -not [string]::IsNullOrWhiteSpace([string](Get-PropertyValue -Object $firstCandidate -Name 'asin'))
+                    $firstHasIdentifiers = $null -ne (Get-PropertyValue -Object $firstCandidate -Name 'identifiers')
+                    if ($firstHasAsin -or $firstHasIdentifiers) {
+                        $catalogItemsPage = $pageResAsArray
+                        Write-Log -Message "Catalog apply fallback: using page response root as items (index=$index,type=$(Get-ObjectTypeName -Value $pageRes),count=$(@($pageResAsArray).Count))" -LogPath $LogPath
+                    }
+                }
+            }
             $catalogItems += @(Expand-CatalogItems -Items $catalogItemsPage)
             & $applyCatalogItems -Items $catalogItemsPage -TargetMap $resultMap -TargetErrorClassMap $errorClassMap -TargetJanLookupMap $chunkJanLookupMap -ParseStats $chunkParseStats -CandidateAsinsMap $candidateAsinsMap -CandidateTitleMap $candidateTitleMap -CandidateMaxAsinsPerJan $candidateMaxAsinsPerJan | Out-Null
         }
@@ -1452,7 +1499,7 @@ function Get-AsinMapByJanBatch {
         }
 
         foreach ($jan in $unresolvedJans) {
-            if (-not $errorReasonMap.ContainsKey($jan)) {
+            if ([string]::IsNullOrWhiteSpace([string]$errorReasonMap[$jan])) {
                 $errorReasonMap[$jan] = $chunkUnresolvedReason
             }
         }
@@ -1470,7 +1517,7 @@ function Get-AsinMapByJanBatch {
         }
 
         foreach ($jan in $chunk) {
-            if (-not $resultMap[$jan] -and -not $errorClassMap.ContainsKey($jan)) {
+            if (-not $resultMap[$jan] -and [string]::IsNullOrWhiteSpace([string]$errorClassMap[$jan])) {
                 $errorClassMap[$jan] = 'NotFound/Validation'
             }
         }
@@ -2044,17 +2091,15 @@ function Invoke-AmazonPriceUpdate {
                 $titleByAsin = if ($candidateTitleMap.ContainsKey($jan)) { $candidateTitleMap[$jan] } else { @{} }
 
                 if ($candidateAsins.Count -eq 0) {
-                    if ($catalogErrorMap.ContainsKey($jan) -and $catalogErrorMap[$jan] -eq 'NotFound/Validation') {
+                    $catalogErrorClass = [string]$catalogErrorMap[$jan]
+                    if ([string]::IsNullOrWhiteSpace($catalogErrorClass) -or $catalogErrorClass -eq 'NotFound/Validation') {
                         $cacheStatus = 'not_found'; $notFoundValidationCount++
                     }
-                    elseif ($catalogErrorMap.ContainsKey($jan) -and $catalogErrorMap[$jan] -eq 'RateLimit/Server') {
+                    elseif ($catalogErrorClass -eq 'RateLimit/Server') {
                         $cacheStatus = 'transient_error'; $rateLimitServerCount++; $transientErrorCount++
                     }
-                    elseif ($catalogErrorMap.ContainsKey($jan)) {
-                        $cacheStatus = 'transient_error'; $otherErrorCount++; $transientErrorCount++
-                    }
                     else {
-                        $cacheStatus = 'not_found'; $notFoundValidationCount++
+                        $cacheStatus = 'transient_error'; $otherErrorCount++; $transientErrorCount++
                     }
                 }
                 else {
