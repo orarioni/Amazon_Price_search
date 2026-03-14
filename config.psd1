@@ -17,7 +17,7 @@
     AvoidMultipackByTitle = $true
     MultipackTitlePenalty = 999999
     CatalogMinIntervalSec = 1.2
-    DebugSpApiResponse = $true
+    DebugSpApiResponse = $false
     DebugSpApiResponseMaxChars = 4000
     JanAsinCacheTtlHours = 168
     OfferCacheTtlHours   = 24
