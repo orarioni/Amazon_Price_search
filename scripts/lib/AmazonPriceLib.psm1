@@ -307,7 +307,7 @@ function ConvertFrom-JsonIfNeeded {
         $trimmed = $text.TrimStart()
         if ($trimmed.StartsWith('{') -or $trimmed.StartsWith('[')) {
             try {
-                $parsed = ($text | ConvertFrom-Json -Depth 100)
+                $parsed = ($text | ConvertFrom-Json)
                 if ($LogPath) {
                     $parsedType = if ($null -ne $parsed) { $parsed.GetType().FullName } else { '<null>' }
                     $ctx = if ([string]::IsNullOrWhiteSpace($Context)) { 'SP-API' } else { $Context }
@@ -661,7 +661,7 @@ function Invoke-SpApiRequest {
                 $rawContent = if ($null -ne $web.Content) { [string]$web.Content } else { '' }
                 if (-not [string]::IsNullOrWhiteSpace($rawContent)) {
                     try {
-                        $res = $rawContent | ConvertFrom-Json -Depth 20
+                        $res = $rawContent | ConvertFrom-Json
                     }
                     catch {
                         $res = $rawContent
