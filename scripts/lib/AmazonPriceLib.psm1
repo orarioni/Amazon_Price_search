@@ -502,6 +502,80 @@ function Update-PricingThrottleFromLimit {
     }
 }
 
+
+function Write-SpApiRequestResponseTraceLog {
+    param(
+        [string]$Endpoint,
+        [string]$Method,
+        [string]$Uri,
+        [object]$RequestHeaders,
+        [object]$RequestBody,
+        [object]$ResponseHeaders,
+        [object]$ResponseBody,
+        [hashtable]$Config,
+        [string]$LogPath,
+        [string]$TraceKind
+    )
+
+    if (-not $Config.DebugSpApiResponse) {
+        return
+    }
+
+    $maxChars = if ($Config.DebugSpApiResponseMaxChars) { [int]$Config.DebugSpApiResponseMaxChars } else { 4000 }
+    $maxChars = [Math]::Max(200, $maxChars)
+
+    $convertToTraceText = {
+        param([object]$Value)
+
+        if ($null -eq $Value) { return '<null>' }
+        if ($Value -is [string]) { return [string]$Value }
+
+        if ($Value -is [System.Collections.Specialized.NameValueCollection]) {
+            $headerMap = @{}
+            foreach ($key in @($Value.AllKeys)) {
+                if ($null -eq $key) { continue }
+                $headerMap[[string]$key] = @($Value.GetValues($key)) -join ','
+            }
+            return (($headerMap | ConvertTo-Json -Depth 5 -Compress) 2>$null)
+        }
+
+        if ($Value -is [System.Collections.IDictionary]) {
+            return (($Value | ConvertTo-Json -Depth 20 -Compress) 2>$null)
+        }
+
+        try {
+            return (($Value | ConvertTo-Json -Depth 20 -Compress) 2>$null)
+        }
+        catch {
+            try {
+                return [string]$Value
+            }
+            catch {
+                return '<unserializable>'
+            }
+        }
+    }
+
+    $truncateAndMask = {
+        param([string]$Text)
+
+        $masked = Mask-SensitiveText -Text $Text
+        if ([string]::IsNullOrWhiteSpace($masked)) { return '<empty>' }
+        if ($masked.Length -gt $maxChars) {
+            return "$($masked.Substring(0, $maxChars))...(truncated)"
+        }
+
+        return $masked
+    }
+
+    $requestHeadersText = & $truncateAndMask (& $convertToTraceText $RequestHeaders)
+    $requestBodyText = & $truncateAndMask (& $convertToTraceText $RequestBody)
+    $responseHeadersText = & $truncateAndMask (& $convertToTraceText $ResponseHeaders)
+    $responseBodyText = & $truncateAndMask (& $convertToTraceText $ResponseBody)
+
+    Write-Log -Message "$Endpoint trace[$TraceKind](max=$maxChars): method=$Method uri=$Uri request.headers=$requestHeadersText request.body=$requestBodyText response.headers=$responseHeadersText response.body=$responseBodyText" -LogPath $LogPath
+}
+
 function Invoke-SpApiRequest {
     param(
         [string]$Endpoint,
@@ -564,6 +638,7 @@ function Invoke-SpApiRequest {
                 Update-PricingThrottleFromLimit -RateLimitLimit $limit -Config $Config
             }
             try {
+                Write-SpApiRequestResponseTraceLog -Endpoint $Endpoint -Method $Method -Uri $Uri -RequestHeaders $Headers -RequestBody $Body -ResponseHeaders $responseHeaders -ResponseBody $res -Config $Config -LogPath $LogPath -TraceKind 'success'
                 Write-SpApiResponseDebugLog -Endpoint $Endpoint -Response $res -Config $Config -LogPath $LogPath
             }
             catch {
@@ -577,6 +652,20 @@ function Invoke-SpApiRequest {
         }
         catch {
             $detail = Get-ErrorDetail -ErrorRecord $_
+            $errorResponseHeaders = $null
+            try {
+                $hasResponse = $_.Exception | Get-Member -Name 'Response' -MemberType 'Property' -ErrorAction SilentlyContinue
+                if ($hasResponse -and $_.Exception.Response) {
+                    $errorResponseHeaders = $_.Exception.Response.Headers
+                }
+            }
+            catch {}
+            try {
+                Write-SpApiRequestResponseTraceLog -Endpoint $Endpoint -Method $Method -Uri $Uri -RequestHeaders $Headers -RequestBody $Body -ResponseHeaders $errorResponseHeaders -ResponseBody $detail.BodyText -Config $Config -LogPath $LogPath -TraceKind 'failure'
+            }
+            catch {
+                Write-Log -Message "$Endpoint trace-hook failed: $($_.Exception.GetType().FullName) - $($_.Exception.Message)" -LogPath $LogPath -Level 'WARN'
+            }
             $status = Get-StatusCodeValue -Status $detail.StatusCode
             if ($null -eq $status) { $status = 0 }
             if ($status -eq 0) {
