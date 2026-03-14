@@ -1367,10 +1367,7 @@ function Get-AsinMapByJanBatch {
     $candidateAsinsMapResult = @{}
     foreach ($jan in $resultMap.Keys) {
         $candidateList = @($candidateAsinsMap[$jan])
-        if ($candidateAsinsMap[$jan] -is [System.Collections.Generic.HashSet[string]]) {
-            $candidateList = @($candidateAsinsMap[$jan].ToArray())
-        }
-        $candidateAsinsMapResult[$jan] = @($candidateList | Where-Object { $_ } | Sort-Object -Unique)
+        $candidateAsinsMapResult[$jan] = @($candidateList | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Sort-Object -Unique)
     }
 
     [PSCustomObject]@{ AsinMap = $resultMap; CandidateAsinsMap = $candidateAsinsMapResult; CandidateTitleMap = $candidateTitleMap; ErrorClassMap = $errorClassMap; ErrorReasonMap = $errorReasonMap }
