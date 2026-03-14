@@ -291,6 +291,49 @@ function Expand-CatalogItems {
     return @($arr)
 }
 
+function ConvertFrom-JsonIfNeeded {
+    param(
+        [object]$Value,
+        [string]$Context,
+        [string]$LogPath
+    )
+
+    if ($null -eq $Value) {
+        return $null
+    }
+
+    if ($Value -is [string]) {
+        $text = [string]$Value
+        $trimmed = $text.TrimStart()
+        if ($trimmed.StartsWith('{') -or $trimmed.StartsWith('[')) {
+            try {
+                $parsed = ($text | ConvertFrom-Json)
+                if ($LogPath) {
+                    $parsedType = if ($null -ne $parsed) { $parsed.GetType().FullName } else { '<null>' }
+                    $ctx = if ([string]::IsNullOrWhiteSpace($Context)) { 'SP-API' } else { $Context }
+                    Write-Log -Message "$ctx json-normalize: parsed successfully. type=$parsedType" -LogPath $LogPath
+                }
+                return $parsed
+            }
+            catch {
+                if ($LogPath) {
+                    $ctx = if ([string]::IsNullOrWhiteSpace($Context)) { 'SP-API' } else { $Context }
+                    $maxChars = 400
+                    $safePreview = Mask-SensitiveText -Text $text
+                    if ($safePreview.Length -gt $maxChars) {
+                        $safePreview = "$($safePreview.Substring(0, $maxChars))...(truncated)"
+                    }
+                    Write-Log -Message "$ctx json-normalize: parse failed: $($_.Exception.Message)" -LogPath $LogPath -Level 'WARN'
+                    Write-Log -Message "$ctx json-normalize raw.preview: $safePreview" -LogPath $LogPath -Level 'WARN'
+                }
+                return $Value
+            }
+        }
+    }
+
+    return $Value
+}
+
 function Write-SpApiResponseShapeLog {
     param(
         [string]$Endpoint,
@@ -502,6 +545,80 @@ function Update-PricingThrottleFromLimit {
     }
 }
 
+
+function Write-SpApiRequestResponseTraceLog {
+    param(
+        [string]$Endpoint,
+        [string]$Method,
+        [string]$Uri,
+        [object]$RequestHeaders,
+        [object]$RequestBody,
+        [object]$ResponseHeaders,
+        [object]$ResponseBody,
+        [hashtable]$Config,
+        [string]$LogPath,
+        [string]$TraceKind
+    )
+
+    if (-not $Config.DebugSpApiResponse) {
+        return
+    }
+
+    $maxChars = if ($Config.DebugSpApiResponseMaxChars) { [int]$Config.DebugSpApiResponseMaxChars } else { 4000 }
+    $maxChars = [Math]::Max(200, $maxChars)
+
+    $convertToTraceText = {
+        param([object]$Value)
+
+        if ($null -eq $Value) { return '<null>' }
+        if ($Value -is [string]) { return [string]$Value }
+
+        if ($Value -is [System.Collections.Specialized.NameValueCollection]) {
+            $headerMap = @{}
+            foreach ($key in @($Value.AllKeys)) {
+                if ($null -eq $key) { continue }
+                $headerMap[[string]$key] = @($Value.GetValues($key)) -join ','
+            }
+            return (($headerMap | ConvertTo-Json -Depth 5 -Compress) 2>$null)
+        }
+
+        if ($Value -is [System.Collections.IDictionary]) {
+            return (($Value | ConvertTo-Json -Depth 20 -Compress) 2>$null)
+        }
+
+        try {
+            return (($Value | ConvertTo-Json -Depth 20 -Compress) 2>$null)
+        }
+        catch {
+            try {
+                return [string]$Value
+            }
+            catch {
+                return '<unserializable>'
+            }
+        }
+    }
+
+    $truncateAndMask = {
+        param([string]$Text)
+
+        $masked = Mask-SensitiveText -Text $Text
+        if ([string]::IsNullOrWhiteSpace($masked)) { return '<empty>' }
+        if ($masked.Length -gt $maxChars) {
+            return "$($masked.Substring(0, $maxChars))...(truncated)"
+        }
+
+        return $masked
+    }
+
+    $requestHeadersText = & $truncateAndMask (& $convertToTraceText $RequestHeaders)
+    $requestBodyText = & $truncateAndMask (& $convertToTraceText $RequestBody)
+    $responseHeadersText = & $truncateAndMask (& $convertToTraceText $ResponseHeaders)
+    $responseBodyText = & $truncateAndMask (& $convertToTraceText $ResponseBody)
+
+    Write-Log -Message "$Endpoint trace[$TraceKind](max=$maxChars): method=$Method uri=$Uri request.headers=$requestHeadersText request.body=$requestBodyText response.headers=$responseHeadersText response.body=$responseBodyText" -LogPath $LogPath
+}
+
 function Invoke-SpApiRequest {
     param(
         [string]$Endpoint,
@@ -544,7 +661,7 @@ function Invoke-SpApiRequest {
                 $rawContent = if ($null -ne $web.Content) { [string]$web.Content } else { '' }
                 if (-not [string]::IsNullOrWhiteSpace($rawContent)) {
                     try {
-                        $res = $rawContent | ConvertFrom-Json -Depth 20
+                        $res = $rawContent | ConvertFrom-Json
                     }
                     catch {
                         $res = $rawContent
@@ -555,6 +672,11 @@ function Invoke-SpApiRequest {
                 }
             }
 
+            $res = ConvertFrom-JsonIfNeeded -Value $res -Context $Endpoint -LogPath $LogPath
+
+            $normalizedType = if ($null -ne $res) { $res.GetType().FullName } else { '<null>' }
+            Write-Log -Message "$Endpoint normalized response.type=$normalizedType" -LogPath $LogPath
+
             $limit = Get-HeaderValue -Headers $responseHeaders -Name 'x-amzn-RateLimit-Limit'
             $requestId = Get-HeaderValue -Headers $responseHeaders -Name 'x-amzn-RequestId'
             if ($limit) {
@@ -564,6 +686,7 @@ function Invoke-SpApiRequest {
                 Update-PricingThrottleFromLimit -RateLimitLimit $limit -Config $Config
             }
             try {
+                Write-SpApiRequestResponseTraceLog -Endpoint $Endpoint -Method $Method -Uri $Uri -RequestHeaders $Headers -RequestBody $Body -ResponseHeaders $responseHeaders -ResponseBody $res -Config $Config -LogPath $LogPath -TraceKind 'success'
                 Write-SpApiResponseDebugLog -Endpoint $Endpoint -Response $res -Config $Config -LogPath $LogPath
             }
             catch {
@@ -577,6 +700,20 @@ function Invoke-SpApiRequest {
         }
         catch {
             $detail = Get-ErrorDetail -ErrorRecord $_
+            $errorResponseHeaders = $null
+            try {
+                $hasResponse = $_.Exception | Get-Member -Name 'Response' -MemberType 'Property' -ErrorAction SilentlyContinue
+                if ($hasResponse -and $_.Exception.Response) {
+                    $errorResponseHeaders = $_.Exception.Response.Headers
+                }
+            }
+            catch {}
+            try {
+                Write-SpApiRequestResponseTraceLog -Endpoint $Endpoint -Method $Method -Uri $Uri -RequestHeaders $Headers -RequestBody $Body -ResponseHeaders $errorResponseHeaders -ResponseBody $detail.BodyText -Config $Config -LogPath $LogPath -TraceKind 'failure'
+            }
+            catch {
+                Write-Log -Message "$Endpoint trace-hook failed: $($_.Exception.GetType().FullName) - $($_.Exception.Message)" -LogPath $LogPath -Level 'WARN'
+            }
             $status = Get-StatusCodeValue -Status $detail.StatusCode
             if ($null -eq $status) { $status = 0 }
             if ($status -eq 0) {
@@ -1196,6 +1333,10 @@ function Get-AsinMapByJanBatch {
         }
         foreach ($jan in $chunk) {
             $resultMap[$jan] = $null
+            $candidateAsinsMap[$jan] = New-Object System.Collections.Generic.HashSet[string]
+            if (-not $candidateTitleMap.ContainsKey($jan)) { $candidateTitleMap[$jan] = @{} }
+            if (-not $errorClassMap.ContainsKey($jan)) { $errorClassMap[$jan] = $null }
+            if (-not $errorReasonMap.ContainsKey($jan)) { $errorReasonMap[$jan] = $null }
             foreach ($lookupKey in (Get-IdentifierMatchKeys -Identifier ([string]$jan))) {
                 if (-not $chunkJanLookupMap.ContainsKey($lookupKey)) {
                     $chunkJanLookupMap[$lookupKey] = [string]$jan
@@ -1248,6 +1389,18 @@ function Get-AsinMapByJanBatch {
 
             $pageResponses += @($res)
             $catalogItemsPage = Get-PropertyValue -Object $res -Name 'items'
+            if (@($catalogItemsPage).Count -eq 0) {
+                $responseAsArray = @($res)
+                if (@($responseAsArray).Count -gt 0) {
+                    $firstCandidate = $responseAsArray[0]
+                    $firstHasAsin = -not [string]::IsNullOrWhiteSpace([string](Get-PropertyValue -Object $firstCandidate -Name 'asin'))
+                    $firstHasIdentifiers = $null -ne (Get-PropertyValue -Object $firstCandidate -Name 'identifiers')
+                    if ($firstHasAsin -or $firstHasIdentifiers) {
+                        $catalogItemsPage = $responseAsArray
+                        Write-Log -Message "Catalog page fetch fallback: using response root as items (index=$index,page=$pageNumber,type=$(Get-ObjectTypeName -Value $res),count=$(@($responseAsArray).Count))" -LogPath $LogPath
+                    }
+                }
+            }
             $expandedItemsPageCount = @(Expand-CatalogItems -Items $catalogItemsPage).Count
             $pagination = Get-PropertyValue -Object $res -Name 'pagination'
             $nextTokenCandidate = [string](Get-PropertyValue -Object $pagination -Name 'nextToken')
@@ -1294,6 +1447,18 @@ function Get-AsinMapByJanBatch {
         $catalogItems = @()
         foreach ($pageRes in @($pageResponses)) {
             $catalogItemsPage = Get-PropertyValue -Object $pageRes -Name 'items'
+            if (@($catalogItemsPage).Count -eq 0) {
+                $pageResAsArray = @($pageRes)
+                if (@($pageResAsArray).Count -gt 0) {
+                    $firstCandidate = $pageResAsArray[0]
+                    $firstHasAsin = -not [string]::IsNullOrWhiteSpace([string](Get-PropertyValue -Object $firstCandidate -Name 'asin'))
+                    $firstHasIdentifiers = $null -ne (Get-PropertyValue -Object $firstCandidate -Name 'identifiers')
+                    if ($firstHasAsin -or $firstHasIdentifiers) {
+                        $catalogItemsPage = $pageResAsArray
+                        Write-Log -Message "Catalog apply fallback: using page response root as items (index=$index,type=$(Get-ObjectTypeName -Value $pageRes),count=$(@($pageResAsArray).Count))" -LogPath $LogPath
+                    }
+                }
+            }
             $catalogItems += @(Expand-CatalogItems -Items $catalogItemsPage)
             & $applyCatalogItems -Items $catalogItemsPage -TargetMap $resultMap -TargetErrorClassMap $errorClassMap -TargetJanLookupMap $chunkJanLookupMap -ParseStats $chunkParseStats -CandidateAsinsMap $candidateAsinsMap -CandidateTitleMap $candidateTitleMap -CandidateMaxAsinsPerJan $candidateMaxAsinsPerJan | Out-Null
         }
@@ -1334,7 +1499,7 @@ function Get-AsinMapByJanBatch {
         }
 
         foreach ($jan in $unresolvedJans) {
-            if (-not $errorReasonMap.ContainsKey($jan)) {
+            if ([string]::IsNullOrWhiteSpace([string]$errorReasonMap[$jan])) {
                 $errorReasonMap[$jan] = $chunkUnresolvedReason
             }
         }
@@ -1352,7 +1517,7 @@ function Get-AsinMapByJanBatch {
         }
 
         foreach ($jan in $chunk) {
-            if (-not $resultMap[$jan] -and -not $errorClassMap.ContainsKey($jan)) {
+            if (-not $resultMap[$jan] -and [string]::IsNullOrWhiteSpace([string]$errorClassMap[$jan])) {
                 $errorClassMap[$jan] = 'NotFound/Validation'
             }
         }
@@ -1361,8 +1526,9 @@ function Get-AsinMapByJanBatch {
     }
 
     $candidateAsinsMapResult = @{}
-    foreach ($jan in $candidateAsinsMap.Keys) {
-        $candidateAsinsMapResult[$jan] = @($candidateAsinsMap[$jan].ToArray() | Sort-Object)
+    foreach ($jan in $resultMap.Keys) {
+        $candidateList = @($candidateAsinsMap[$jan])
+        $candidateAsinsMapResult[$jan] = @($candidateList | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Sort-Object -Unique)
     }
 
     [PSCustomObject]@{ AsinMap = $resultMap; CandidateAsinsMap = $candidateAsinsMapResult; CandidateTitleMap = $candidateTitleMap; ErrorClassMap = $errorClassMap; ErrorReasonMap = $errorReasonMap }
@@ -1866,10 +2032,10 @@ function Invoke-AmazonPriceUpdate {
         $uniqueAsinCount = 0
         if ($needApiJans.Count -gt 0) {
             $catalogResult = Get-AsinMapByJanBatch -Jans $needApiJans -AccessToken $accessToken -Config $Config -LogPath $logPath -AuthContext $authContext
-            $asinMap = $catalogResult.AsinMap
-            $candidateAsinsMap = if ($catalogResult.CandidateAsinsMap) { $catalogResult.CandidateAsinsMap } else { @{} }
-            $candidateTitleMap = if ($catalogResult.CandidateTitleMap) { $catalogResult.CandidateTitleMap } else { @{} }
-            $catalogErrorMap = $catalogResult.ErrorClassMap
+            $asinMap = if ($catalogResult.AsinMap -is [hashtable]) { $catalogResult.AsinMap } else { @{} }
+            $candidateAsinsMap = if ($catalogResult.CandidateAsinsMap -is [hashtable]) { $catalogResult.CandidateAsinsMap } else { @{} }
+            $candidateTitleMap = if ($catalogResult.CandidateTitleMap -is [hashtable]) { $catalogResult.CandidateTitleMap } else { @{} }
+            $catalogErrorMap = if ($catalogResult.ErrorClassMap -is [hashtable]) { $catalogResult.ErrorClassMap } else { @{} }
             $catalogApiCalls = $script:RunStats.CatalogBatchCalls
 
             $priceMap = @{}
@@ -1877,7 +2043,8 @@ function Invoke-AmazonPriceUpdate {
             $allCandidateAsins = @()
             foreach ($jan in $needApiJans) {
                 if ($candidateAsinsMap.ContainsKey($jan)) {
-                    $allCandidateAsins += @($candidateAsinsMap[$jan])
+                    $candidates = @($candidateAsinsMap[$jan])
+                    $allCandidateAsins += $candidates
                 }
                 elseif ($asinMap[$jan]) {
                     $allCandidateAsins += @([string]$asinMap[$jan])
@@ -1902,6 +2069,10 @@ function Invoke-AmazonPriceUpdate {
                 }
             }
 
+            if ($allAsins.Count -eq 0) {
+                # Guard for the known crash path when all Catalog responses are empty.
+                Write-Log -Message 'No candidate ASINs found; skipping pricing.' -LogPath $logPath
+            }
             if ($needPriceAsins.Count -gt 0) {
                 $distinctAsins = @($needPriceAsins | Sort-Object -Unique)
                 $pricingResult = Get-PriceMapByAsinBatch -Asins $distinctAsins -AccessToken $accessToken -Config $Config -LogPath $logPath -AuthContext $authContext
@@ -1916,20 +2087,19 @@ function Invoke-AmazonPriceUpdate {
                 $asin = $null
                 $price = $null
                 $candidateAsins = if ($candidateAsinsMap.ContainsKey($jan)) { @($candidateAsinsMap[$jan]) } elseif ($asinMap[$jan]) { @([string]$asinMap[$jan]) } else { @() }
+                $candidateAsins = @($candidateAsins)
                 $titleByAsin = if ($candidateTitleMap.ContainsKey($jan)) { $candidateTitleMap[$jan] } else { @{} }
 
                 if ($candidateAsins.Count -eq 0) {
-                    if ($catalogErrorMap.ContainsKey($jan) -and $catalogErrorMap[$jan] -eq 'NotFound/Validation') {
+                    $catalogErrorClass = [string]$catalogErrorMap[$jan]
+                    if ([string]::IsNullOrWhiteSpace($catalogErrorClass) -or $catalogErrorClass -eq 'NotFound/Validation') {
                         $cacheStatus = 'not_found'; $notFoundValidationCount++
                     }
-                    elseif ($catalogErrorMap.ContainsKey($jan) -and $catalogErrorMap[$jan] -eq 'RateLimit/Server') {
+                    elseif ($catalogErrorClass -eq 'RateLimit/Server') {
                         $cacheStatus = 'transient_error'; $rateLimitServerCount++; $transientErrorCount++
                     }
-                    elseif ($catalogErrorMap.ContainsKey($jan)) {
-                        $cacheStatus = 'transient_error'; $otherErrorCount++; $transientErrorCount++
-                    }
                     else {
-                        $cacheStatus = 'not_found'; $notFoundValidationCount++
+                        $cacheStatus = 'transient_error'; $otherErrorCount++; $transientErrorCount++
                     }
                 }
                 else {
