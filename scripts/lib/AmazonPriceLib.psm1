@@ -291,6 +291,29 @@ function Expand-CatalogItems {
     return @($arr)
 }
 
+function ConvertFrom-JsonIfNeeded {
+    param([object]$Value)
+
+    if ($null -eq $Value) {
+        return $null
+    }
+
+    if ($Value -is [string]) {
+        $text = [string]$Value
+        $trimmed = $text.TrimStart()
+        if ($trimmed.StartsWith('{') -or $trimmed.StartsWith('[')) {
+            try {
+                return ($text | ConvertFrom-Json -Depth 100)
+            }
+            catch {
+                return $Value
+            }
+        }
+    }
+
+    return $Value
+}
+
 function Write-SpApiResponseShapeLog {
     param(
         [string]$Endpoint,
@@ -628,6 +651,8 @@ function Invoke-SpApiRequest {
                     $res = $null
                 }
             }
+
+            $res = ConvertFrom-JsonIfNeeded -Value $res
 
             $limit = Get-HeaderValue -Headers $responseHeaders -Name 'x-amzn-RateLimit-Limit'
             $requestId = Get-HeaderValue -Headers $responseHeaders -Name 'x-amzn-RequestId'
